@@ -8,3 +8,5 @@ config/config.conf
 credentials/
 .DS_Store
 logs/
+
+airflow.env
