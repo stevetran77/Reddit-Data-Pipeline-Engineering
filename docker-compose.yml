@@ -3,9 +3,12 @@ x-airflow-common:
   build:
     context: .
     dockerfile: Dockerfile
-  image: custom-airflow:2.7.1-python3.11
+  image: custom-airflow:2.7.1-python3.11-openaq
   env_file:
     - airflow.env
+  environment:
+    # OpenAQ Pipeline Configuration
+    PYTHONUNBUFFERED: "1"
   volumes:
     - ./config:/opt/airflow/config
     - ./dags:/opt/airflow/dags
@@ -25,6 +28,7 @@ x-airflow-common:
 services:
   postgres:
     image: postgres:12
+    container_name: airflow-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -32,28 +36,69 @@ services:
       POSTGRES_PORT: 5432
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   redis:
-    image: redis:latest
+    image: redis:7-alpine
+    container_name: airflow-redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis_data:/data
 
   airflow-init:
     <<: *airflow-common
+    container_name: airflow-init
     command: >
       bash -c "pip install -r /opt/airflow/requirements.txt && airflow db init && airflow db upgrade && airflow users create --username admin --firstname admin --lastname admin --role Admin --email airflow@airflow.com --password admin"
     restart: "no"
+    entrypoint: /bin/bash
 
   airflow-webserver:
     <<: *airflow-common
+    container_name: airflow-webserver
     command: webserver
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   airflow-scheduler:
     <<: *airflow-common
+    container_name: airflow-scheduler
     command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
   airflow-worker:
     <<: *airflow-common
+    container_name: airflow-worker
     command: celery worker
+    environment:
+      DASK_DISTRIBUTED__WORKER__MEMORY__TARGET: 0.9
+      DASK_DISTRIBUTED__WORKER__MEMORY__SPILL: 0.85
+      DASK_DISTRIBUTED__WORKER__MEMORY__PAUSE: 0.80
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
