@@ -10,3 +10,5 @@ credentials/
 logs/
 
 airflow.env
+
+.serena/
