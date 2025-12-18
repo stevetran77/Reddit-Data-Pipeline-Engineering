@@ -60,6 +60,13 @@ GLUE_IAM_ROLE = config.get("aws_glue", "glue_iam_role", fallback="")
 
 
 # ============================================================================
+# AWS ATHENA CONFIGURATION
+# ============================================================================
+ATHENA_DATABASE = config.get("aws_athena", "athena_database", fallback="openaq_database")
+ATHENA_OUTPUT_LOCATION = config.get("aws_athena", "athena_output_location", fallback="s3://openaq-athena-results")
+
+
+# ============================================================================
 # AWS REDSHIFT CONFIGURATION
 # ============================================================================
 REDSHIFT_HOST = config.get("aws_redshift", "redshift_host", fallback="")
