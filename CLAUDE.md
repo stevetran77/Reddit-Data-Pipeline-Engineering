@@ -4,42 +4,42 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is an OpenAQ Air Quality Data Pipeline using Apache Airflow 3.1.5 with Python 3.11. The project implements an end-to-end ETL pipeline that extracts air quality data from OpenAQ API, loads to S3 (Parquet), catalogs with AWS Glue, transforms and loads to Redshift, and visualizes with Looker. The architecture uses Airflow's CeleryExecutor with PostgreSQL for metadata storage and Redis as the message broker.
+This is an OpenAQ Air Quality Data Pipeline using Apache Airflow 3.1.5 with Python 3.11. The project implements an end-to-end ETL pipeline that extracts air quality data from OpenAQ API, loads to S3 (Parquet), catalogs with AWS Glue, transforms and queries with Amazon Athena, and visualizes with Looker. The architecture uses Airflow's CeleryExecutor with PostgreSQL for metadata storage and Redis as the message broker.
 
 ## Architecture
 
 ### Data Flow
 
 ```
-OpenAQ API → Airflow (extract) → S3 (Parquet) → Glue Crawler → Glue ETL Job → Redshift → Looker
+OpenAQ API → Airflow (extract) → S3 (Parquet) → Glue Crawler → Athena Queries → Looker
 ```
 
 The pipeline orchestrates these steps through a single Airflow DAG (`openaq_to_redshift_pipeline`):
 
 1. **Extract Phase**: Parallel extraction tasks for multiple cities (Hanoi, HCMC) call OpenAQ API and upload partitioned Parquet files to S3
 2. **Catalog Phase**: Glue Crawler scans S3 and updates Data Catalog schema
-3. **Transform & Load Phase**: Glue ETL Job reads from catalog, deduplicates, applies quality checks, and loads to Redshift
-4. **Validation Phase**: Verifies data loaded successfully to Redshift
+3. **Transform & Query Phase**: Athena queries the cataloged data directly from S3, applies data transformations, deduplication, and quality checks
+4. **Validation Phase**: Verifies data is queryable in Athena
 
 ### Core Components
 
 - **Airflow Orchestration**: Manages DAG workflows with CeleryExecutor for parallel task execution
 - **OpenAQ Integration**: `etls/openaq_etl.py` handles API connection, location extraction, and measurement retrieval
-- **AWS Services**: S3 for data lake, Glue for cataloging and ETL, Redshift for data warehouse
+- **AWS Services**: S3 for data lake, Glue for cataloging and schema management, Athena for serverless SQL queries
 - **Data Partitioning**: S3 files organized by `airquality/{city}/year={Y}/month={M}/day={D}/data.parquet`
 - **PostgreSQL Database**: Stores Airflow metadata (database name: `airflow_reddit` - legacy naming)
 - **Redis**: Message broker for Celery task queue
 
 ### Directory Structure
 
-- `dags/` - Airflow DAG definitions (`openaq_dag.py` defines the 7-task pipeline)
-- `pipelines/` - High-level pipeline orchestration (`openaq_pipeline.py`, `glue_pipeline.py`)
+- `dags/` - Airflow DAG definitions (`openaq_dag.py` defines the pipeline tasks)
+- `pipelines/` - High-level pipeline orchestration (`openaq_pipeline.py`, `glue_pipeline.py`, `athena_pipeline.py`)
 - `etls/` - ETL modules (`openaq_etl.py` for API interactions)
-- `utils/` - Utility modules (`aws_utils.py`, `glue_utils.py`, `redshift_utils.py`, `constants.py`)
+- `utils/` - Utility modules (`aws_utils.py`, `glue_utils.py`, `athena_utils.py`, `constants.py`)
 - `config/` - Configuration files (`config.conf` contains all credentials - gitignored, `config.conf.example` is template)
-- `sql/` - SQL scripts (`redshift_schema.sql` for warehouse schema)
-- `glue_jobs/` - Glue ETL scripts to upload to S3 (`openaq_to_redshift.py`)
-- `tests/` - Unit tests with pytest (`test_glue_utils.py`, `test_redshift_utils.py`)
+- `sql/` - SQL scripts for Athena table creation and data transformations
+- `glue_jobs/` - Glue scripts (if needed for advanced processing)
+- `tests/` - Unit tests with pytest (`test_glue_utils.py`, `test_athena_utils.py`)
 - `doc/` - Documentation (`OPENAQ_PIPELINE_PLAN.md` contains detailed implementation plan)
 
 ### Configuration System
@@ -48,8 +48,8 @@ All configuration is centralized in `config/config.conf` (not in version control
 
 - `[database]` - PostgreSQL connection for Airflow metadata
 - `[aws]` - AWS credentials and S3 bucket
-- `[aws_glue]` - Glue database, crawler, ETL job names
-- `[aws_redshift]` - Redshift cluster connection details
+- `[aws_glue]` - Glue database and crawler names
+- `[aws_athena]` - Athena database and output S3 location for query results
 - `[api_keys]` - OpenAQ API key
 - `[openaq_settings]` - Default city, country, lookback hours
 - `[etl_settings]` - Batch size, error handling, log level
@@ -152,16 +152,17 @@ All pipelines follow this structure:
 3. **Cataloging** (`pipelines/glue_pipeline.py`):
    - `trigger_crawler_task()` - Start Glue Crawler
    - `check_crawler_status()` - Poll crawler until READY state
-   - Crawler creates/updates Glue Data Catalog tables
+   - Crawler creates/updates Glue Data Catalog tables for S3 Parquet files
 
-4. **Transformation** (`glue_jobs/openaq_to_redshift.py`):
-   - Runs in AWS Glue environment (PySpark)
+4. **Transformation & Query** (`pipelines/athena_pipeline.py` and `utils/athena_utils.py`):
+   - `execute_query()` - Run SQL queries in Athena against Glue Catalog tables
+   - Queries run directly on S3 data (no data movement)
    - Deduplication by location_id + measurement_datetime
    - Data quality checks (null values, coordinate validation)
-   - Writes to Redshift via JDBC connection
+   - Results stored in S3 output location
 
-5. **Validation** (`pipelines/glue_pipeline.py`):
-   - `validate_redshift_load()` - Check row count in fact_measurements table
+5. **Validation** (`pipelines/athena_pipeline.py`):
+   - `validate_athena_load()` or `get_table_count()` - Check row count in Athena tables
 
 ### DAG Task Dependencies
 
@@ -174,11 +175,9 @@ trigger_glue_crawler
     ↓
 wait_for_crawler (PythonSensor, 60s poke interval, 30min timeout)
     ↓
-trigger_glue_etl_job
+execute_athena_query
     ↓
-wait_for_glue_job (PythonSensor, 120s poke interval, 60min timeout)
-    ↓
-validate_redshift_data
+validate_athena_data
 ```
 
 ### Error Handling
@@ -193,32 +192,22 @@ validate_redshift_data
 The pipeline requires these AWS resources (created manually via Console):
 
 1. **S3 Bucket**: `openaq-data-pipeline`
-   - Folders: `airquality/`, `scripts/`, `temp/`
+   - Folders: `airquality/` (data lake), `athena-results/` (query output), `scripts/` (optional)
 
 2. **Glue Database**: `openaq_database`
 
 3. **Glue Crawler**: `openaq_s3_crawler`
    - Data source: `s3://openaq-data-pipeline/airquality/`
    - Creates tables with prefix: `aq_`
+   - Scans on schedule or triggered by Airflow
 
-4. **Glue ETL Job**: `openaq_to_redshift`
-   - Script location: Upload `glue_jobs/openaq_to_redshift.py` to `s3://openaq-data-pipeline/scripts/`
-   - Glue version: 4.0
-   - Worker type: G.1X (2 workers)
-   - Requires Glue Connection to Redshift
+4. **Athena Database**: `openaq_database` (same as Glue database)
+   - Configured to use Glue Data Catalog
+   - Query results location: `s3://openaq-data-pipeline/athena-results/`
 
-5. **Glue Connection**: `RedshiftConnection`
-   - Type: JDBC
-   - URL: `jdbc:redshift://<cluster>:5439/openaq_warehouse`
-
-6. **Redshift Cluster**: `openaq-warehouse`
-   - Database: `openaq_warehouse`
-   - Schema: Created by running `sql/redshift_schema.sql`
-   - Tables: `openaq.fact_measurements`, `openaq.dim_locations`
-
-7. **IAM Roles**:
-   - `GlueServiceRole` - Glue access to S3 and Redshift
-   - `RedshiftS3Role` - Redshift COPY from S3
+5. **IAM Roles**:
+   - `GlueServiceRole` - Glue access to S3 for crawler operations
+   - `AthenaExecutionRole` - Athena access to S3 for queries (read `airquality/`, write `athena-results/`)
 
 ## Configuration Notes
 
@@ -248,24 +237,24 @@ Changes to Python files are immediately available (Airflow scheduler rescans DAG
 - **Airflow Task Logs**: Airflow UI → DAG → Task Instance → Logs tab
 - **Container Logs**: `docker-compose logs -f <service-name>`
 - **PostgreSQL Metadata**: Connect to localhost:5432, database `airflow_reddit`
-- **Glue Job Logs**: AWS Console → Glue → Jobs → Run details → CloudWatch logs
-- **Redshift Query Monitoring**: AWS Console → Redshift → Query monitoring
+- **Glue Crawler Logs**: AWS Console → Glue → Crawlers → Run details → CloudWatch logs
+- **Athena Query Logs**: AWS Console → Athena → Query results and history (shows execution details)
 
 ### Common Issues
 
 1. **"config.conf not found"**: Create `config/config.conf` from template
 2. **"No module named 'openaq'"**: Run `pip install -r requirements.txt` or rebuild Docker
 3. **Crawler fails**: Check S3 path and IAM role permissions
-4. **Glue job fails**: Verify Glue Connection to Redshift is configured correctly
-5. **Sensor timeout**: Check crawler/job is actually running in AWS Console
+4. **Athena query fails**: Verify Athena database/table exists, check IAM role permissions on S3
+5. **"INVALID_QUERY" error**: Check SQL syntax and table names in Glue Catalog
+6. **Sensor timeout**: Check crawler/query is actually running in AWS Console
 
 ## Key Dependencies
 
 - **apache-airflow**: 3.1.5 (scheduler and webserver)
 - **openaq**: 0.2.0 (OpenAQ API client)
 - **boto3**: 1.35.0 (AWS SDK)
-- **awswrangler**: 3.9.1 (AWS data wrangling for Glue)
-- **redshift-connector**: 2.1.4 (Redshift database connector)
+- **awswrangler**: 3.9.1 (AWS data wrangling for S3/Glue)
 - **pandas**: 2.3.3 (data manipulation)
 - **pyarrow**: 18.1.0 (Parquet support)
 - **sqlalchemy**: 2.0.45 (database ORM)
