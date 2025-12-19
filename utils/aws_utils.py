@@ -14,10 +14,9 @@ from utils.constants import (
 def get_s3_client():
     """
     Create and return authenticated S3 client.
-
-    Returns:
-        boto3.client: S3 client instance
     """
+    # Ưu tiên dùng Airflow Connection nếu có (để bảo mật hơn)
+    # Nhưng giữ logic cũ tương thích với file config hiện tại
     session_config = {
         'aws_access_key_id': AWS_ACCESS_KEY_ID,
         'aws_secret_access_key': AWS_SECRET_ACCESS_KEY,
@@ -34,15 +33,6 @@ def upload_to_s3(data: pd.DataFrame, bucket: str, key: str,
                  format: str = 'json') -> bool:
     """
     Upload DataFrame to S3 as JSON or Parquet.
-
-    Args:
-        data: pandas DataFrame to upload
-        bucket: S3 bucket name
-        key: S3 object key (file path)
-        format: 'json' or 'parquet'
-
-    Returns:
-        bool: True if successful
     """
     s3_client = get_s3_client()
 
@@ -59,7 +49,8 @@ def upload_to_s3(data: pd.DataFrame, bucket: str, key: str,
         elif format == 'parquet':
             # Save to temporary parquet file then upload
             buffer = io.BytesIO()
-            data.to_parquet(buffer, engine='pyarrow', compression='snappy')
+            # engine='pyarrow' mặc định hỗ trợ tốt nhất
+            data.to_parquet(buffer, engine='pyarrow', compression='snappy', index=False)
             buffer.seek(0)
             s3_client.put_object(
                 Bucket=bucket,
@@ -80,9 +71,6 @@ def upload_to_s3(data: pd.DataFrame, bucket: str, key: str,
 def check_s3_connection() -> bool:
     """
     Test S3 connection by listing buckets.
-
-    Returns:
-        bool: True if connection successful
     """
     try:
         s3_client = get_s3_client()
@@ -98,27 +86,28 @@ def upload_to_s3_partitioned(data: pd.DataFrame, bucket: str, base_key: str,
                              partition_cols: list, format: str = 'json') -> bool:
     """
     Upload DataFrame to S3 with date partitioning.
-
-    Args:
-        data: pandas DataFrame to upload
-        bucket: S3 bucket name
-        base_key: Base S3 path (e.g., 'airquality/hanoi')
-        partition_cols: Columns to partition by (e.g., ['year', 'month', 'day'])
-        format: 'json' or 'parquet'
-
-    Returns:
-        bool: True if successful
+    REMOVES partition columns from the file content to avoid Glue duplicate errors.
     """
+    # Create a copy to avoid SettingWithCopyWarning
+    df = data.copy()
+
     # Add partition columns if not exist
-    if 'datetime' in data.columns:
-        data['year'] = data['datetime'].dt.year
-        data['month'] = data['datetime'].dt.month.astype(str).str.zfill(2)
-        data['day'] = data['datetime'].dt.day.astype(str).str.zfill(2)
+    if 'datetime' in df.columns:
+        df['year'] = df['datetime'].dt.year
+        df['month'] = df['datetime'].dt.month.astype(str).str.zfill(2)
+        df['day'] = df['datetime'].dt.day.astype(str).str.zfill(2)
 
     # Group by partition
-    for partition, group_df in data.groupby(partition_cols):
+    for partition, group_df in df.groupby(partition_cols):
+        # Tạo đường dẫn thư mục Partition (Hive style: key=value)
         partition_path = '/'.join([f"{col}={val}" for col, val in zip(partition_cols, partition)])
         s3_key = f"{base_key}/{partition_path}/data.{format}"
-        upload_to_s3(group_df, bucket, s3_key, format)
+        
+        # QUAN TRỌNG: Loại bỏ các cột partition khỏi nội dung file
+        # Vì thông tin này đã nằm trên đường dẫn thư mục rồi.
+        # Nếu để lại sẽ gây lỗi "Duplicate columns" trong Athena/Glue.
+        group_df_clean = group_df.drop(columns=partition_cols)
+        
+        upload_to_s3(group_df_clean, bucket, s3_key, format)
 
     return True
