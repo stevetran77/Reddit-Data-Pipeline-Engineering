@@ -60,16 +60,11 @@ def log_warning(msg: str):
 # ============================================================================
 log_info("Initializing Glue Context...")
 
+# Gộp tất cả tham số vào một list duy nhất
+# AWS Glue sẽ tự động bỏ qua các tham số thừa (như --TempDir) không có trong list này
 args = getResolvedOptions(
     sys.argv,
-    ['JOB_NAME', 'input_path', 'output_path']
-)
-
-# Optional arguments with defaults
-optional_args = getResolvedOptions(
-    sys.argv,
-    ['env', 'partition_cols'],
-    allow_extra_keys=True
+    ['JOB_NAME', 'input_path', 'output_path', 'env', 'partition_cols']
 )
 
 sc = SparkContext()
@@ -82,14 +77,13 @@ job.init(args['JOB_NAME'], args)
 JOB_NAME = args['JOB_NAME']
 INPUT_PATH = args['input_path']
 OUTPUT_PATH = args['output_path']
-ENV = optional_args.get('env', 'dev')
-PARTITION_COLS = optional_args.get('partition_cols', 'year,month,day').split(',')
+
+# Lấy giá trị từ args (Lưu ý: getResolvedOptions bắt buộc các tham số trên phải tồn tại)
+# Vì Airflow pipeline của bạn LUÔN truyền env và partition_cols, nên không sợ lỗi thiếu tham số.
+ENV = args.get('env', 'dev')
+PARTITION_COLS = args.get('partition_cols', 'year,month,day').split(',')
 
 log_ok(f"Glue job initialized: {JOB_NAME}")
-log_info(f"Environment: {ENV}")
-log_info(f"Input path: {INPUT_PATH}")
-log_info(f"Output path: {OUTPUT_PATH}")
-log_info(f"Partition columns: {PARTITION_COLS}")
 
 # ============================================================================
 # STEP 2: Đọc dữ liệu Raw (JSON) từ S3
@@ -120,9 +114,10 @@ log_info("\n=== STEP 2: Transform measurements ===")
 
 try:
     # Parse datetime string to timestamp
+    # Sử dụng cast("timestamp") để tự động xử lý định dạng ISO 8601 có timezone (+07:00)
     df_transformed = df_raw.withColumn(
         "datetime",
-        F.to_timestamp(F.col("datetime"), "yyyy-MM-dd'T'HH:mm:ss")
+        F.col("datetime").cast("timestamp")
     )
 
     # Extract partition columns
@@ -180,12 +175,13 @@ log_info("\n=== STEP 4: Enrich with metadata ===")
 
 try:
     # Extract unique location metadata from raw data
+    # CRITICAL: Cast to explicit types to prevent VoidType errors when all values are null
     metadata_df = df_raw.select(
-        F.col("location_id"),
-        F.col("city").alias("city_name"),
-        F.col("country").alias("country_code"),
-        F.col("latitude"),
-        F.col("longitude")
+        F.col("location_id").cast("string"),
+        F.col("city").cast("string").alias("city_name"),
+        F.col("country").cast("string").alias("country_code"),
+        F.col("latitude").cast("double"),
+        F.col("longitude").cast("double")
     ).dropDuplicates(["location_id"])
 
     # Join with pivoted data
@@ -255,7 +251,6 @@ try:
     df_repartitioned.write \
         .mode("append") \
         .partitionBy(PARTITION_COLS) \
-        .option("path", OUTPUT_PATH) \
         .parquet(OUTPUT_PATH)
 
     log_success(f"Written partitioned Parquet to {OUTPUT_PATH}")

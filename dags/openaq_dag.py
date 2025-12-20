@@ -28,7 +28,7 @@ dag = DAG(
     dag_id='openaq_to_athena_pipeline',
     default_args=default_args,
     description='Extract air quality data from OpenAQ, load to S3, catalog with Glue Crawler, validate with Athena',
-    schedule_interval='@daily',  # Runs at midnight daily
+    schedule_interval=None,  # Runs at midnight daily
     catchup=False,
     tags=['openaq', 'airquality', 'etl', 's3', 'glue', 'athena', 'pipeline']
 )

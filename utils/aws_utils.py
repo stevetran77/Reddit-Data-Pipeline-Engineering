@@ -39,7 +39,9 @@ def upload_to_s3(data: pd.DataFrame, bucket: str, key: str,
     try:
         if format == 'json':
             # Convert DataFrame to JSON
-            json_buffer = data.to_json(orient='records', date_format='iso')
+            # [FIX] Thêm lines=True để tạo format NDJSON (tương thích tốt nhất với Spark/Glue)
+            json_buffer = data.to_json(orient='records', date_format='iso', lines=True)
+            
             s3_client.put_object(
                 Bucket=bucket,
                 Key=key,

@@ -29,5 +29,8 @@ python-dotenv>=1.0.0
 Jinja2>=3.1.0
 click>=8.0.0
 
+# PySpark (for local testing - Docker installs this separately)
+pyspark==3.4.1
+
 # Logging & Monitoring
 structlog>=23.0.0
