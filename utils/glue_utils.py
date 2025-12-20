@@ -91,3 +91,58 @@ def wait_for_job(job_name: str, run_id: str, timeout: int = 3600) -> bool:
         time.sleep(60)
     print(f"[FAIL] Glue job '{job_name}' timed out after {timeout}s")
     return False
+
+
+def get_job_run_details(job_name: str, run_id: str) -> dict:
+    """Get detailed information about a Glue job run."""
+    client = get_glue_client()
+    try:
+        response = client.get_job_run(JobName=job_name, RunId=run_id)
+        job_run = response['JobRun']
+
+        details = {
+            'run_id': run_id,
+            'state': job_run.get('JobRunState'),
+            'started_on': job_run.get('StartedOn'),
+            'completed_on': job_run.get('CompletedOn'),
+            'execution_time': job_run.get('ExecutionTime'),
+            'error_message': job_run.get('ErrorMessage'),
+            'log_group_name': job_run.get('LogGroupName'),
+            'arguments': job_run.get('Arguments'),
+            'glue_version': job_run.get('GlueVersion'),
+        }
+        print(f"[OK] Retrieved job run details for {job_name} (run_id: {run_id})")
+        return details
+    except Exception as e:
+        print(f"[FAIL] Failed to get job run details: {str(e)}")
+        raise
+
+
+def trigger_glue_job_and_wait(
+    job_name: str,
+    arguments: dict = None,
+    max_wait_seconds: int = 7200
+) -> bool:
+    """Convenience function: Start a Glue job and wait for it to complete."""
+    print(f"[START] Triggering Glue job: {job_name}")
+    run_id = start_glue_job(job_name, arguments)
+    success = wait_for_job(job_name, run_id, timeout=max_wait_seconds)
+    if not success:
+        raise Exception(f"Glue job {job_name} failed or timed out")
+    return True
+
+
+def list_glue_jobs() -> list:
+    """List all Glue jobs in the AWS account."""
+    client = get_glue_client()
+    try:
+        jobs = []
+        paginator = client.get_paginator('get_jobs')
+        for page in paginator.paginate():
+            for job in page.get('Jobs', []):
+                jobs.append(job['Name'])
+        print(f"[OK] Found {len(jobs)} Glue jobs")
+        return jobs
+    except Exception as e:
+        print(f"[FAIL] Failed to list Glue jobs: {str(e)}")
+        raise

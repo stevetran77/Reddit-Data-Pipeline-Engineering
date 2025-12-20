@@ -7,6 +7,7 @@ from airflow.operators.python import PythonOperator
 
 from tasks.catalog_tasks import create_catalog_tasks
 from tasks.validation_tasks import create_validate_athena_task
+from tasks.glue_transform_tasks import create_glue_transform_tasks
 from pipelines.openaq_pipeline import openaq_pipeline
 
 # DAG Configuration
@@ -53,12 +54,21 @@ extract_all_vietnam = PythonOperator(
 # Single extraction task (contains all Vietnam locations including Hanoi and HCMC)
 extraction_tasks = [extract_all_vietnam]
 
+# Create Glue transform tasks (trigger + wait)
+# These transform raw JSON to partitioned Parquet using Spark
+trigger_glue_transform_task, wait_glue_transform_task = create_glue_transform_tasks(dag)
+
 # Create catalog tasks (trigger + wait)
+# Glue Crawler scans S3 marts and updates Glue Data Catalog
 trigger_crawler_task, wait_crawler_task = create_catalog_tasks(dag)
 
 # Create validation task
+# Verify data is queryable in Athena
 validate_task = create_validate_athena_task(dag)
 
-# Task Dependencies
-# Single Vietnam-wide extraction -> trigger crawler -> wait for crawler -> validate data
-extract_all_vietnam >> trigger_crawler_task >> wait_crawler_task >> validate_task
+# Task Dependencies (Updated Pipeline Flow)
+# 1. Extract raw measurements from OpenAQ API
+# 2. Transform raw JSON to Parquet using Spark (Glue job)
+# 3. Catalog transformed data using Glue Crawler
+# 4. Validate data in Athena
+extract_all_vietnam >> trigger_glue_transform_task >> wait_glue_transform_task >> trigger_crawler_task >> wait_crawler_task >> validate_task

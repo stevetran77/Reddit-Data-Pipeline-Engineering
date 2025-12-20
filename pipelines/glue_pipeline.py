@@ -1,11 +1,15 @@
 """
 Glue and Athena pipeline functions for Airflow DAG tasks.
+Handles Glue Crawler cataloging, Glue Transform job orchestration, and Athena validation.
 """
 from utils.glue_utils import (
-    start_crawler, get_crawler_status
+    start_crawler, get_crawler_status, start_glue_job, get_job_run_status, get_job_run_details
 )
 from utils.athena_utils import get_table_count, list_tables
-from utils.constants import GLUE_CRAWLER_NAME, ATHENA_DATABASE
+from utils.constants import (
+    GLUE_CRAWLER_NAME, GLUE_TRANSFORM_JOB_NAME, ATHENA_DATABASE, ENV,
+    RAW_FOLDER, AWS_BUCKET_NAME
+)
 
 
 def trigger_crawler_task(crawler_name: str = None, **context) -> str:
@@ -39,71 +43,180 @@ def check_crawler_status(**context) -> bool:
 
 
 def validate_athena_data(**context) -> bool:
-    """Validate data is queryable in Athena after Glue cataloging.
-    
-    Checks for both legacy city-based tables (aq_hanoi, aq_ho_chi_minh_city)
-    and new Vietnam-wide location tables (aq_vietnam_location_*).
-    """
-    print("[START] Validating Athena data availability")
+    """Validate data is queryable in Athena after Glue cataloging."""
+    print(f"[START] Validating Athena data availability in DB: {ATHENA_DATABASE} ({ENV} env)")
 
     try:
-        # List available tables in Athena database
+        # 1. Lấy danh sách bảng
         tables = list_tables(ATHENA_DATABASE)
-        print(f"[INFO] Found {len(tables)} tables in Athena database '{ATHENA_DATABASE}'")
+        print(f"[INFO] Found {len(tables)} tables in database '{ATHENA_DATABASE}'")
 
         if not tables:
-            print("[WARNING] No tables found in Athena database")
+            print(f"[WARNING] No tables found in Athena database '{ATHENA_DATABASE}'")
+            # Nếu là môi trường mới chưa có bảng thì fail để cảnh báo
             return False
 
-        # Look for air quality tables (created by Glue Crawler with 'aq_' prefix)
-        # This includes both:
-        # - Legacy: aq_hanoi, aq_ho_chi_minh_city
-        # - New: aq_vietnam_location_* (for each location)
-        aq_tables = [t for t in tables if t.startswith('aq_')]
-        print(f"[INFO] Found {len(aq_tables)} air quality tables")
+        # 2. Kiểm tra dữ liệu trong các bảng
+        print(f"[INFO] Validating data in {len(tables)} tables...")
+        
+        tables_with_data = 0
+        empty_tables = []
 
-        # Separate legacy and new tables for better reporting
-        legacy_tables = [t for t in aq_tables if t in ['aq_hanoi', 'aq_ho_chi_minh_city']]
-        vietnam_tables = [t for t in aq_tables if t.startswith('aq_vietnam_')]
-
-        if legacy_tables:
-            print(f"[INFO] Legacy city tables: {legacy_tables}")
-        if vietnam_tables:
-            print(f"[INFO] Vietnam location tables: {len(vietnam_tables)} tables")
-
-        if not aq_tables:
-            print("[WARNING] No air quality tables found in Athena")
-            return False
-
-        # Validate each table has data
-        failed_tables = []
-        for table_name in aq_tables:
+        for table_name in tables:
             try:
+                # Đếm số dòng
                 count = get_table_count(table_name, ATHENA_DATABASE)
                 
-                # Log only if we have data or if it's a legacy table (might be old)
                 if count > 0:
                     print(f"[OK] Table '{table_name}' has {count} rows")
-                elif table_name in legacy_tables:
-                    print(f"[INFO] Legacy table '{table_name}' has {count} rows (may be outdated)")
+                    tables_with_data += 1
                 else:
                     print(f"[WARNING] Table '{table_name}' is empty")
-                    failed_tables.append(table_name)
+                    empty_tables.append(table_name)
 
             except Exception as e:
                 print(f"[WARNING] Failed to validate table '{table_name}': {e}")
                 continue
 
-        # Fail validation if any new Vietnam tables are empty (they should have data)
-        # But allow legacy tables to be empty
-        new_table_failures = [t for t in failed_tables if t not in legacy_tables]
-        if new_table_failures and len(new_table_failures) == len(vietnam_tables) and vietnam_tables:
-            print(f"[FAIL] All new Vietnam tables are empty")
+        # 3. Kết luận
+        # Chỉ cần có ít nhất 1 bảng có dữ liệu là coi như Pipeline chạy thành công
+        if tables_with_data > 0:
+            print(f"[SUCCESS] Validation Passed: {tables_with_data}/{len(tables)} tables have data.")
+            return True
+        else:
+            print(f"[FAIL] All tables in '{ATHENA_DATABASE}' are empty or inaccessible.")
             return False
-
-        print(f"[SUCCESS] Athena data validation passed ({len(aq_tables)} tables validated)")
-        return True
 
     except Exception as e:
         print(f"[FAIL] Athena validation failed: {e}")
         raise
+
+
+def trigger_glue_transform_job(job_name: str = None, **context) -> str:
+    """
+    Trigger AWS Glue PySpark transformation job.
+
+    This function:
+    1. Retrieves raw data S3 path from upstream extraction task via XCom
+    2. Prepares job arguments (input/output paths)
+    3. Starts Glue job with PySpark transformation script
+    4. Stores job run_id in XCom for downstream monitoring
+
+    Input: Raw JSON measurements from OpenAQ extraction
+    - s3://bucket/aq_raw/year/month/day/hour/*.json
+
+    Transformations applied by Glue job:
+    - Parse datetime strings to Spark timestamps
+    - Deduplicate measurements by location_id + datetime
+    - Pivot parameter columns (PM2.5, PM10, NO2, SO2, O3, CO)
+    - Enrich with location metadata (coordinates, city, country)
+    - Extract year/month/day partition columns
+
+    Output: Partitioned Parquet files
+    - s3://bucket/aq_dev/marts/year=YYYY/month=MM/day=DD/*.parquet
+
+    Args:
+        job_name: Glue job name (uses config default if None)
+        **context: Airflow context (ti, task_instance, etc.)
+
+    Returns:
+        str: Glue job run ID
+
+    XCom Push:
+        - glue_transform_job_run_id: Run ID for monitoring
+        - glue_transform_job_name: Job name
+    """
+    job_name = job_name or GLUE_TRANSFORM_JOB_NAME
+
+    print(f"[START] Triggering Glue Transform Job: {job_name}")
+
+    ti = context['ti']
+
+    # Pull extraction result from upstream task
+    try:
+        extraction_result = ti.xcom_pull(
+            task_ids='extract_all_vietnam_locations',
+            key='return_value'
+        )
+    except:
+        extraction_result = None
+
+    if not extraction_result:
+        print("[WARNING] No extraction result found. Using default paths.")
+        extraction_result = {
+            'status': 'WARNING',
+            'location_count': 0,
+            'record_count': 0,
+            'raw_s3_path': f"s3://{AWS_BUCKET_NAME}/{RAW_FOLDER}/"
+        }
+
+    raw_s3_path = extraction_result.get('raw_s3_path', f"s3://{AWS_BUCKET_NAME}/{RAW_FOLDER}/")
+    location_count = extraction_result.get('location_count', 0)
+    record_count = extraction_result.get('record_count', 0)
+
+    print(f"[INFO] Extraction metadata:")
+    print(f"  - Locations: {location_count}")
+    print(f"  - Records: {record_count}")
+    print(f"  - Raw data path: {raw_s3_path}")
+
+    # Prepare Glue job arguments
+    input_path = f"s3://{AWS_BUCKET_NAME}/{RAW_FOLDER}/"
+    output_path = f"s3://{AWS_BUCKET_NAME}/aq_dev/marts/"
+
+    job_arguments = {
+        '--input_path': input_path,
+        '--output_path': output_path,
+        '--env': ENV,
+        '--partition_cols': 'year,month,day',
+        '--TempDir': f"s3://{AWS_BUCKET_NAME}/glue-temp/",
+    }
+
+    print(f"[INFO] Glue Job Arguments:")
+    for key, value in job_arguments.items():
+        print(f"  {key}: {value}")
+
+    try:
+        # Start Glue job
+        run_id = start_glue_job(job_name=job_name, arguments=job_arguments)
+
+        # Push to XCom for downstream tasks
+        ti.xcom_push(key='glue_transform_job_run_id', value=run_id)
+        ti.xcom_push(key='glue_transform_job_name', value=job_name)
+
+        print(f"[OK] Glue transform job triggered successfully")
+        print(f"[INFO] Job run ID: {run_id}")
+
+        return run_id
+
+    except Exception as e:
+        print(f"[FAIL] Failed to trigger Glue transform job: {str(e)}")
+        raise
+
+
+def check_glue_transform_status(**context) -> bool:
+    """Check if Glue transform job has completed - callable for Airflow sensor."""
+    run_id = context['ti'].xcom_pull(key='glue_transform_job_run_id')
+    job_name = context['ti'].xcom_pull(key='glue_transform_job_name') or GLUE_TRANSFORM_JOB_NAME
+
+    if not run_id:
+        print("[WARNING] No job run ID found in XCom. Waiting...")
+        return False
+
+    status = get_job_run_status(job_name, run_id)
+
+    print(f"[INFO] Glue transform job status: {status}")
+    print(f"  Job: {job_name}")
+    print(f"  Run ID: {run_id}")
+
+    if status == 'SUCCEEDED':
+        print(f"[SUCCESS] Glue transform job '{job_name}' completed successfully")
+        return True
+    elif status in ['RUNNING', 'STARTING']:
+        print(f"[INFO] Glue transform job '{job_name}' status: {status}")
+        return False
+    else:
+        # FAILED, ERROR, TIMEOUT
+        details = get_job_run_details(job_name, run_id)
+        error_msg = details.get('error_message', 'Unknown error')
+        print(f"[FAIL] Glue transform job '{job_name}' failed: {error_msg}")
+        raise Exception(f"Glue job {job_name} failed with status: {status}")

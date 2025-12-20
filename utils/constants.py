@@ -17,6 +17,29 @@ else:
 
 
 # ============================================================================
+# ENVIRONMENT CONFIGURATION (UPDATED)
+# ============================================================================
+# Mặc định là 'dev'
+ENV = os.getenv('PIPELINE_ENV', 'dev').lower()
+
+# Chỉ map 2 môi trường chính tương ứng với folder bạn có
+ENV_FOLDER_MAP = {
+    'dev': 'aq_dev',
+    'prod': 'aq_prod'
+}
+
+# Lấy folder hiện tại. 
+# Nếu ENV là 'staging' hay gì khác lạ, nó sẽ fallback về 'aq_dev' để an toàn.
+CURRENT_ENV_FOLDER = ENV_FOLDER_MAP.get(ENV, 'aq_dev')
+
+# Folder chứa dữ liệu thô (Input/Backup)
+RAW_FOLDER = 'aq_raw'
+
+print(f"[INFO] Pipeline running in environment: {ENV}")
+print(f"[INFO] Storage Paths -> Marts: {CURRENT_ENV_FOLDER} | Raw: {RAW_FOLDER}")
+
+
+# ============================================================================
 # DATABASE CONFIGURATION
 # ============================================================================
 DATABASE_HOST = config.get("database", "database_host", fallback="localhost")
@@ -25,7 +48,6 @@ DATABASE_NAME = config.get("database", "database_name", fallback="airflow_reddit
 DATABASE_USERNAME = config.get("database", "database_username", fallback="postgres")
 DATABASE_PASSWORD = config.get("database", "database_password", fallback="postgres")
 
-# Database connection string for SQLAlchemy
 DATABASE_URL = f"postgresql://{DATABASE_USERNAME}:{DATABASE_PASSWORD}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}"
 
 
@@ -35,7 +57,6 @@ DATABASE_URL = f"postgresql://{DATABASE_USERNAME}:{DATABASE_PASSWORD}@{DATABASE_
 INPUT_PATH = config.get("file_paths", "input_path", fallback="/opt/airflow/data/input")
 OUTPUT_PATH = config.get("file_paths", "output_path", fallback="/opt/airflow/data/output")
 
-# Create directories if they don't exist
 os.makedirs(INPUT_PATH, exist_ok=True)
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
@@ -53,17 +74,37 @@ AWS_BUCKET_NAME = config.get("aws", "aws_bucket_name", fallback="")
 # ============================================================================
 # AWS GLUE CONFIGURATION
 # ============================================================================
-GLUE_DATABASE_NAME = config.get("aws_glue", "glue_database_name", fallback="openaq_database")
-GLUE_CRAWLER_NAME = config.get("aws_glue", "glue_crawler_name", fallback="openaq_s3_crawler")
+_glue_db_base = config.get("aws_glue", "glue_database_name", fallback="openaq_database")
+_glue_crawler_base = config.get("aws_glue", "glue_crawler_name", fallback="openaq_s3_crawler")
+
+# Tên Database: openaq_dev hoặc openaq_prod
+GLUE_DATABASE_NAME = f"openaq_{ENV}" if ENV in ['dev', 'prod'] else "openaq_dev"
+
+# Tên Crawler: openaq_s3_crawler_dev hoặc openaq_s3_crawler_prod
+GLUE_CRAWLER_NAME = f"openaq_s3_crawler_{ENV}" if ENV in ['dev', 'prod'] else "openaq_s3_crawler_dev"
+
+# Tên Transform Job: openaq_transform_measurements_dev hoặc openaq_transform_measurements_prod
+GLUE_TRANSFORM_JOB_NAME = config.get(
+    "aws_glue",
+    "glue_transform_job_name",
+    fallback=f"openaq_transform_measurements_{ENV}"
+)
+
+# Cấu hình PySpark ETL Job
 GLUE_ETL_JOB_NAME = config.get("aws_glue", "glue_etl_job_name", fallback="openaq_to_redshift")
 GLUE_IAM_ROLE = config.get("aws_glue", "glue_iam_role", fallback="")
+GLUE_JOB_TIMEOUT = config.getint("aws_glue", "glue_job_timeout", fallback=2880)  # 48 hours
+GLUE_WORKER_TYPE = config.get("aws_glue", "glue_worker_type", fallback="G.1X")
+GLUE_NUM_WORKERS = config.getint("aws_glue", "glue_num_workers", fallback=2)
 
 
 # ============================================================================
 # AWS ATHENA CONFIGURATION
 # ============================================================================
-ATHENA_DATABASE = config.get("aws_athena", "athena_database", fallback="openaq_database")
-ATHENA_OUTPUT_LOCATION = config.get("aws_athena", "athena_output_location", fallback="s3://openaq-athena-results")
+ATHENA_DATABASE = GLUE_DATABASE_NAME
+_bucket = config.get("aws", "aws_bucket_name", fallback="")
+# Folder kết quả query: aq_dev/athena-results hoặc aq_prod/athena-results
+ATHENA_OUTPUT_LOCATION = f"s3://{_bucket}/{CURRENT_ENV_FOLDER}/athena-results/"
 
 
 # ============================================================================
@@ -90,8 +131,6 @@ LOG_LEVEL = config.get("etl_settings", "log_level", fallback="info").upper()
 # OPENAQ API CONFIGURATION
 # ============================================================================
 OPENAQ_API_KEY = config.get("api_keys", "openaq_api_key", fallback="")
-
-# OpenAQ Settings
 OPENAQ_TARGET_CITY = config.get("openaq_settings", "target_city", fallback="Hanoi")
 OPENAQ_TARGET_COUNTRY = config.get("openaq_settings", "target_country", fallback="VN")
 OPENAQ_DATA_GRANULARITY = config.get("openaq_settings", "data_granularity", fallback="hourly")
@@ -99,47 +138,21 @@ OPENAQ_LOOKBACK_HOURS = config.getint("openaq_settings", "lookback_hours", fallb
 
 
 # ============================================================================
-# HELPER FUNCTION
+# HELPER FUNCTIONS
 # ============================================================================
 def get_config(section: str, key: str, fallback=None):
-    """
-    Get a configuration value from the config file.
-
-    Args:
-        section (str): The section name in the config file
-        key (str): The key name within the section
-        fallback: Default value if key is not found
-
-    Returns:
-        The configuration value or fallback
-    """
     return config.get(section, key, fallback=fallback)
 
-
 def get_config_int(section: str, key: str, fallback=None):
-    """
-    Get an integer configuration value from the config file.
-
-    Args:
-        section (str): The section name in the config file
-        key (str): The key name within the section
-        fallback: Default value if key is not found
-
-    Returns:
-        The configuration value as integer or fallback
-    """
     return config.getint(section, key, fallback=fallback)
 
-
 def print_config_summary():
-    """Print a summary of loaded configuration (excluding sensitive data)."""
+    """Print a summary of loaded configuration."""
     print("=" * 60)
     print("CONFIGURATION SUMMARY")
     print("=" * 60)
+    print(f"Env: {ENV}")
+    print(f"Marts Folder: {CURRENT_ENV_FOLDER}")
+    print(f"Raw Folder: {RAW_FOLDER}")
     print(f"Database: {DATABASE_USERNAME}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}")
-    print(f"Input Path: {INPUT_PATH}")
-    print(f"Output Path: {OUTPUT_PATH}")
-    print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Error Handling: {ERROR_HANDLING}")
-    print(f"Log Level: {LOG_LEVEL}")
     print("=" * 60)
