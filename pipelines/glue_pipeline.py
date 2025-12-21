@@ -10,7 +10,7 @@ from utils.constants import (
     GLUE_CRAWLER_NAME, GLUE_TRANSFORM_JOB_NAME, ATHENA_DATABASE, ENV,
     RAW_FOLDER, AWS_BUCKET_NAME
 )
-
+from utils.constants import OPENAQ_TARGET_COUNTRY
 
 def trigger_crawler_task(crawler_name: str = None, **context) -> str:
     """Trigger Glue Crawler - callable for Airflow task."""
@@ -159,9 +159,10 @@ def trigger_glue_transform_job(job_name: str = None, **context) -> str:
     print(f"  - Records: {record_count}")
     print(f"  - Raw data path: {raw_s3_path}")
 
+    country_folder = OPENAQ_TARGET_COUNTRY.lower()
     # Prepare Glue job arguments
     input_path = f"s3://{AWS_BUCKET_NAME}/{RAW_FOLDER}/"
-    output_path = f"s3://{AWS_BUCKET_NAME}/aq_dev/marts/"
+    output_path = f"s3://{AWS_BUCKET_NAME}/aq_dev/marts/{country_folder}/"
 
     job_arguments = {
         '--input_path': input_path,

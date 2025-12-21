@@ -22,7 +22,8 @@ from etls.openaq_etl import (
     extract_locations,
     extract_measurements,
     fetch_all_vietnam_locations,
-    filter_active_locations
+    filter_active_locations,
+    enrich_measurements_with_metadata
 )
 
 # Import S3 upload functions
@@ -89,8 +90,16 @@ def openaq_pipeline(file_name: str, city: str = None, country: str = None,
             print(f"[OK] Found {len(location_ids)} active monitoring locations")
         else:
             print(f"[2/4] Fetching locations for {city}...")
+            # For single city mode, we also need location objects for metadata enrichment
+            # First, get location IDs
             location_ids = extract_locations(headers, city, country)
-            location_objs = []
+
+            # Then fetch full location details for enrichment
+            # We'll fetch all Vietnam locations and filter by IDs
+            # (This is a workaround since extract_locations only returns IDs)
+            all_locations = fetch_all_vietnam_locations(headers)
+            location_objs = [loc for loc in all_locations if loc['id'] in location_ids]
+
             print(f"[OK] Found {len(location_ids)} monitoring locations")
 
         if len(location_ids) == 0:
@@ -119,6 +128,12 @@ def openaq_pipeline(file_name: str, city: str = None, country: str = None,
                 'raw_s3_path': None
             }
 
+        # STEP 3.5: Enrich measurements with location metadata (city, coordinates)
+        print(f"[3.5/4] Enriching measurements with metadata...")
+        df_raw = pd.DataFrame(measurements)
+        df_enriched = enrich_measurements_with_metadata(df_raw, location_objs)
+        print(f"[OK] Enriched {len(df_enriched)} records with location metadata")
+
         # STEP 4: Archive raw data to S3 (JSON format for Glue to process)
         print(f"[4/4] Archiving raw data to S3...")
         now = datetime.now()
@@ -126,9 +141,8 @@ def openaq_pipeline(file_name: str, city: str = None, country: str = None,
         # Structure: aq_raw/year/month/day/hour/raw_measurements.json
         raw_key = f"{RAW_FOLDER}/{now.year}/{now.strftime('%m')}/{now.strftime('%d')}/{now.strftime('%H')}/raw_{file_name}.json"
 
-        # Convert list of dicts to DataFrame for upload
-        df_raw = pd.DataFrame(measurements)
-        upload_to_s3(df_raw, AWS_BUCKET_NAME, raw_key, format='json')
+        # Upload enriched DataFrame to S3
+        upload_to_s3(df_enriched, AWS_BUCKET_NAME, raw_key, format='json')
 
         result = {
             'status': 'SUCCESS',
