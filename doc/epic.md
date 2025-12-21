@@ -35,7 +35,7 @@ This document outlines the implementation plan for the **OpenAQ Local Lakehouse*
 **Goal:** Establish the local runtime environment and cloud storage structure.
 **Value:** A working local Airflow setup that can talk to AWS services.
 
-### Story 1.1: Setup Local Docker Airflow
+### Story 1.1: Setup Local Docker Airflow  (DONE)
 **As a** Data Engineer,
 **I want** to deploy Airflow locally using Docker Compose,
 **So that** I can orchestrate pipelines using my own machine's resources without cloud costs.
