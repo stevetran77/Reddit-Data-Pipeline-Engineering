@@ -1,29 +1,28 @@
-# OpenAQ Lean Lakehouse - Epic Breakdown
+# OpenAQ Local Lakehouse - Epic Breakdown
 
 **Author:** John (Product Manager)
 **Date:** 2025-12-21
 **Project Level:** 2 (Brownfield/Restructuring)
-**Target Scale:** AWS Free Tier / Personal Project
+**Target Scale:** AWS Free Tier / Personal Project (Local Execution)
 
 ---
 
 ## Overview
-
-This document provides the complete epic and story breakdown for the **OpenAQ Data Pipeline**. It decomposes the requirements from the Architecture Document into implementable stories suitable for a single developer or AI agent.
+This document outlines the implementation plan for the **OpenAQ Local Lakehouse**. It is designed for a single developer running orchestration locally while leveraging AWS Serverless (Glue/Athena) for heavy lifting.
 
 **Key Architecture Decisions Reflected:**
-* **Orchestration:** Airflow LocalExecutor on EC2 (No Redis/Celery).
+* **Orchestration:** Airflow LocalExecutor (Docker Desktop).
+* **Compute Strategy:** Offload transformation to AWS Glue; run light tasks locally.
 * **Data Flow:** `Raw` (JSON) → `Dev` (Parquet via Glue) → `Prod` (Athena Views).
 * **Visualization:** OWOX Data Mart connecting to Athena Views.
 
 ---
 
 ## Functional Requirements Inventory
-
-* **FR1:** Infrastructure capable of running Airflow on 1GB RAM (Free Tier).
-* **FR2:** Logical separation of Dev and Prod environments without duplicating resources.
+* **FR1:** Infrastructure capable of running Airflow locally (Docker).
+* **FR2:** Logical separation of Dev and Prod environments.
 * **FR3:** Extraction of OpenAQ API data to immutable Raw storage.
-* **FR4:** Transformation of raw data to optimized Parquet format.
+* **FR4:** Transformation of raw data to optimized Parquet format (via Glue).
 * **FR5:** Automated cataloging of data for SQL access.
 * **FR6:** Production data layer that filters invalid measurements.
 * **FR7:** Visualization of current and historical air quality trends.
@@ -31,203 +30,135 @@ This document provides the complete epic and story breakdown for the **OpenAQ Da
 
 ---
 
-## Epic 1: Lean Infrastructure Foundation
+## Epic 1: Infrastructure Foundation
 
-**Goal:** Establish the cost-effective "Serverless Lakehouse" runtime environment on AWS Free Tier.
-**Value:** Enables the team to deploy pipelines immediately without accruing fixed costs.
+**Goal:** Establish the local runtime environment and cloud storage structure.
+**Value:** A working local Airflow setup that can talk to AWS services.
 
-### Story 1.1: Provision Lean Airflow on EC2
+### Story 1.1: Setup Local Docker Airflow
 **As a** Data Engineer,
-**I want** to deploy a lightweight Airflow instance on EC2,
-**So that** I can orchestrate pipelines without crashing the 1GB RAM limit.
+**I want** to deploy Airflow locally using Docker Compose,
+**So that** I can orchestrate pipelines using my own machine's resources without cloud costs.
 
 **Acceptance Criteria:**
-* **Given** an AWS Free Tier account and a `t3.small` (or `micro` with swap) EC2 instance.
-* **When** I deploy the project `docker-compose.yml`.
+* **Given** Docker Desktop is installed.
+* **When** I run `docker-compose up -d`.
 * **Then** Airflow Webserver and Scheduler are running.
-* **And** the `LocalExecutor` is configured (NO Redis, NO Celery containers).
-* **And** the instance has IAM role access to S3 and Glue.
+* **And** `LocalExecutor` is configured.
+* **And** the project directory is mounted as a volume for live code editing.
 
-**Technical Notes:**
-* Modify existing `docker-compose.yml` to remove Redis/Worker services.
-* Setup swap space (2GB) on EC2.
+### Story 1.2: Configure AWS Authentication for Local Docker
+**As a** Developer,
+**I want** to securely inject my AWS credentials into the Docker containers,
+**So that** Airflow tasks can access S3 and Glue without hardcoding keys in the code.
 
-### Story 1.2: Configure S3 Data Lake Structure
+**Acceptance Criteria:**
+* **Given** an IAM User `openaq-local-dev` with programmatic access.
+* **When** I configure `.env` or mount `~/.aws/credentials`.
+* **Then** I can run `aws s3 ls` successfully from *inside* the Airflow container.
+* **And** credentials are NOT committed to git.
+
+### Story 1.3: Configure S3 Data Lake Structure
 **As a** System,
-**I want** a structured S3 bucket with logical environment separation,
-**So that** raw and processed data are isolated for Dev and Prod.
+**I want** a structured S3 bucket with environment prefixes,
+**So that** data is cleanly organized by layer.
 
 **Acceptance Criteria:**
 * **Given** the bucket `openaq-data-pipeline`.
-* **When** I inspect the bucket structure.
-* **Then** the following prefixes exist:
-    * `/dev/raw/`, `/dev/processed/`
-    * `/prod/raw/`, `/prod/processed/`
-    * `/athena-results/`
-* **And** the bucket blocks all public access.
-
-### Story 1.3: Setup IAM User for OWOX Integration
-**As a** Product Manager,
-**I want** a dedicated IAM user for the visualization connector,
-**So that** OWOX can query our data securely without root access.
-
-**Acceptance Criteria:**
-* **Given** the AWS IAM console.
-* **When** I create the user `owox-integrator`.
-* **Then** it has programmatic access only (Access Key/Secret).
-* **And** it has the `AWSQuicksightAthenaAccess` managed policy.
-* **And** it has an inline policy allowing `s3:GetObject` on the data bucket.
+* **When** I inspect the bucket.
+* **Then** prefixes `/raw/`, `/dev/`, and `/prod/` exist.
+* **And** public access is blocked.
 
 ---
 
 ## Epic 2: Data Ingestion & Processing
 
-**Goal:** Implement the ELT pipeline using Airflow for extraction and AWS Glue for transformation.
-**Value:** Establishes the core data flow. By the end of this epic, data will flow into S3 and be cataloged.
+**Goal:** Build the hybrid Local/Cloud ELT pipeline.
+**Value:** Data flowing from API to S3 and being transformed into queryable Parquet.
 
-### Story 2.1: Implement API Extraction to Raw Layer
+### Story 2.1: Implement API Extraction to Raw Layer (Local)
 **As a** Data Engineer,
-**I want** to extract air quality data from the OpenAQ API and save it as JSON,
-**So that** I have an immutable copy of the source data (Raw layer) in S3.
+**I want** to extract data from OpenAQ API to JSON using local compute,
+**So that** I have an immutable backup in the Raw layer without paying for cloud compute.
 
 **Acceptance Criteria:**
 * **Given** the OpenAQ API v3 client.
-* **When** the extraction task runs (manually triggered).
-* **Then** it fetches measurements for the target locations.
-* **And** it saves the *exact* API response payload as `.json` files.
-* **And** the upload path follows: `s3://.../dev/raw/year=YYYY/month=MM/day=DD/`.
-* **And** the process is idempotent.
+* **When** the `extract_task` runs locally.
+* **Then** it fetches measurements and saves exact JSON responses.
+* **And** uploads to `s3://.../raw/year=YYYY/month=MM/day=DD/`.
 
-**Technical Notes:**
-* Use `PythonOperator`. Do not transform data here.
-
-### Story 2.2: Develop Glue ETL Job for Raw->Dev Transformation
+### Story 2.2: Develop Glue ETL Job for Transformation (Cloud)
 **As a** Data Engineer,
-**I want** a Glue ETL Job to process Raw JSON into Parquet,
-**So that** transformation processing is offloaded to serverless infrastructure.
+**I want** a Glue Job to process JSON to Parquet,
+**So that** heavy compute is offloaded to AWS (Serverless) and doesn't freeze my local machine.
 
 **Acceptance Criteria:**
-* **Given** JSON files in the `dev/raw` S3 bucket.
+* **Given** JSON files in `raw`.
 * **When** the Glue Job `openaq_raw_to_dev` runs.
-* **Then** it reads the JSON data and flattens nested structures.
-* **And** it converts types (timestamps to UTC, values to float).
-* **And** it writes Snappy-compressed Parquet files to `s3://.../dev/processed/`.
-* **And** it maintains Hive partitions.
+* **Then** it reads JSON, flattens structures, and converts types.
+* **And** writes Snappy-compressed Parquet to `s3://.../dev/`.
+* **And** runs successfully on AWS Glue infrastructure.
 
-### Story 2.3: Configure Glue Crawler for Dev Layer
+### Story 2.3: Orchestrate Glue Trigger from Airflow
 **As a** Data Engineer,
-**I want** a Glue Crawler to scan the `dev` S3 bucket,
-**So that** the transformed data is discoverable in the Athena `openaq_dev` database.
+**I want** an Airflow task that starts the Glue Job and waits for completion,
+**So that** my local orchestrator controls the cloud transformation.
 
 **Acceptance Criteria:**
-* **Given** the `dev/processed/` S3 path.
+* **Given** the `GlueJobOperator` or custom Boto3 hook.
+* **When** the task runs.
+* **Then** it triggers the specific Glue Job.
+* **And** it polls for "SUCCEEDED" status before proceeding.
+
+### Story 2.4: Configure Glue Crawler
+**As a** Data Engineer,
+**I want** a crawler to catalog the `dev` layer,
+**So that** Athena can query the transformed data.
+
+**Acceptance Criteria:**
 * **When** the crawler runs.
-* **Then** it updates the `openaq_dev` Data Catalog tables.
-* **And** it adds new partitions automatically.
-
-### Story 2.4: Orchestrate Manual Ingestion DAG
-**As a** Data Engineer,
-**I want** an Airflow DAG to coordinate the Extraction, Transformation, and Cataloging,
-**So that** I can trigger the full pipeline on demand.
-
-**Acceptance Criteria:**
-* **Given** the Airflow environment.
-* **When** I manually trigger the DAG `openaq_ingestion`.
-* **Then** it executes: `Extract` -> `Glue Transform` -> `Glue Crawler`.
+* **Then** the `openaq_dev` database contains tables with correct partitions.
 
 ---
 
 ## Epic 3: The Serving Layer (Athena & Prod)
 
 **Goal:** Create the "Production" environment using Athena Views.
-**Value:** Provides a stable, clean data interface for Looker, shielding it from raw data issues.
+**Value:** Stable, clean data interface for visualization.
 
-### Story 3.1: Configure Prod Database Infrastructure
-**As a** Data Engineer,
-**I want** to establish the `openaq_prod` logical database in Athena,
-**So that** I have a dedicated namespace for production views.
-
-**Acceptance Criteria:**
-* **When** the setup task runs.
-* **Then** the database `openaq_prod` exists.
-* **And** the `openaq_dev` database is accessible as the source.
-
-### Story 3.2: Implement `view_latest_aqi` (Real-Time View)
+### Story 3.1: Configure Athena Views
 **As a** Data Analyst,
-**I want** a view that shows only the most recent valid measurement,
-**So that** my dashboard doesn't show outdated or negative values.
+**I want** SQL Views in the `openaq_prod` database,
+**So that** I query clean, aggregated data (filtering out sensor errors).
 
-**Acceptance Criteria:**
-* **When** I query `openaq_prod.view_latest_aqi`.
-* **Then** it returns only the latest timestamp per location.
-* **And** it filters out values < 0.
-* **And** it performs efficiently (< 5s query time).
+**Technical Notes:**
+* `view_latest_aqi`: Latest snapshot per location.
+* `view_daily_average`: Daily aggregation for trends.
 
-### Story 3.3: Implement `view_daily_average` (Aggregated View)
-**As a** Business User,
-**I want** a pre-aggregated daily summary view,
-**So that** looking at 30-day trends is fast and cheap.
-
-**Acceptance Criteria:**
-* **When** I query `openaq_prod.view_daily_average`.
-* **Then** I see one row per location per day with `avg_pm25`.
-* **And** incomplete days (<50% coverage) are flagged.
-
-### Story 3.4: Implement View Validation Task
+### Story 3.2: Implement Validation Task
 **As a** Test Engineer,
-**I want** an automated check that runs after ETL,
-**So that** I receive an alert if the Prod views are broken before OWOX reads them.
+**I want** to run a "Health Check" query on the views,
+**So that** I know the data is valid before checking the dashboard.
 
 **Acceptance Criteria:**
-* **When** the `validate_prod_views` task runs.
-* **Then** it executes a count query on the Prod view.
-* **And** fails the pipeline if the view is empty.
+* **When** the validation task runs.
+* **Then** it queries `view_latest_aqi` count.
+* **And** fails the DAG if the count is 0.
 
 ---
 
 ## Epic 4: Visualization & Lifecycle
 
-**Goal:** Establish the Visualization Layer using OWOX and Looker Studio.
-**Value:** Dashboards that drive decisions, with a safe Dev/Prod workflow.
+**Goal:** Connect the data to Looker via OWOX.
+**Value:** Actionable insights.
 
-### Story 4.1: Configure OWOX Data Marts
-**As a** Data Analyst,
-**I want** to connect OWOX to my Athena databases,
-**So that** Looker Studio can access the curated views.
-
-**Acceptance Criteria:**
-* **When** I configure OWOX BI.
-* **Then** I create two Data Marts: `OpenAQ Dev` and `OpenAQ Prod`.
-* **And** both connect successfully using the IAM User from Story 1.3.
-
-### Story 4.2: Create Looker Studio Data Sources
-**As a** Data Analyst,
-**I want** to create Looker Data Sources for both environments,
-**So that** I can toggle reports between testing and production.
-
-**Acceptance Criteria:**
-* **Then** I have `DS_OpenAQ_Dev` and `DS_OpenAQ_Prod` data sources in Looker.
-* **And** field types (Geo, Date) are correct.
-
-### Story 4.3: Build 'Air Quality Overview' Dashboard
+### Story 4.1: Connect OWOX to Looker
 **As a** User,
-**I want** a dashboard showing trends and current status,
+**I want** to see Dev/Prod dashboards in Looker,
 **So that** I can monitor air quality in Vietnam.
 
 **Acceptance Criteria:**
-* **Then** the dashboard includes a Map (Latest AQI) and Trend Line (Daily Avg).
-* **And** I can filter by City.
-
-### Story 4.4: Validate Environment Switching
-**As a** Release Manager,
-**I want** to verify I can point the dashboard to Prod,
-**So that** I can "promote" my changes after testing.
-
-**Acceptance Criteria:**
-* **When** I swap the dashboard Data Source from Dev to Prod.
-* **Then** the charts load successfully without breaking.
-
----
-
-**Status:** Ready for Implementation
-**Prioritization:** Sequential (Epic 1 -> 2 -> 3 -> 4)
+* **Given** the IAM User credentials.
+* **When** I configure OWOX.
+* **Then** I can create Data Sources for `OpenAQ Dev` and `OpenAQ Prod`.
+* **And** charts load correctly in Looker Studio.

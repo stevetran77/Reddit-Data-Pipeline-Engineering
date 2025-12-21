@@ -1,18 +1,22 @@
+### **File: `architecture.md**`
+
 ```markdown
-# Architecture: OpenAQ Lean Lakehouse
+# Architecture: OpenAQ Local Lakehouse
 
 ## Executive Summary
-The OpenAQ Data Pipeline is a **Serverless Lakehouse** architecture designed for the AWS Free Tier. It leverages **EC2 (t3.small)** for lightweight orchestration via **Airflow (LocalExecutor)**, while offloading storage and compute to **S3** and **Amazon Athena**. The system follows a strict **Raw -> Dev -> Prod** data layering strategy to ensure data quality and lineage, culminating in an **OWOX + Looker Studio** visualization layer with distinct environments.
+The OpenAQ Data Pipeline is a **Local Docker Lakehouse** that leverages the power of AWS Serverless services. Orchestration runs locally on **Docker Desktop** (Airflow LocalExecutor) to minimize costs and improve development velocity. Heavy data processing is offloaded to **AWS Glue ETL Jobs**, ensuring the local machine acts only as a trigger, not a compute node. Data is stored in **S3** and queried via **Amazon Athena**, creating a robust, zero-maintenance data platform.
 
 ## Project Initialization
-First implementation story should execute:
+To set up the environment:
 ```bash
-# Initialize project structure with environment separation
-mkdir -p dags/dev dags/prod etls pipelines utils config sql/athena_views
-# Set up Python environment
+# 1. Configure AWS CLI with IAM User credentials
+aws configure
+
+# 2. Initialize local project structure
+mkdir -p dags/{raw,dev,prod} etls glue_jobs pipelines utils config sql/athena_views
 python -m venv .venv
 source .venv/bin/activate
-pip install apache-airflow pandas boto3 awswrangler
+pip install -r requirements.txt
 
 ```
 
@@ -20,119 +24,81 @@ pip install apache-airflow pandas boto3 awswrangler
 
 | Category | Decision | Version | Rationale |
 | --- | --- | --- | --- |
-| **Orchestration** | **Airflow (LocalExecutor)** | 2.7+ | Fits within EC2 Free Tier (1GB RAM) by removing Redis/Celery overhead. |
-| **Compute** | **EC2 (Docker)** | t3.small | Single node hosting Airflow and Metadata DB. Cost-effective for low volume. |
-| **Storage** | **AWS S3** | Standard | Primary Data Lake storage. Partitioned by Hive style (`/year=YYYY/...`). |
-| **Warehouse** | **Amazon Athena** | V3 | Serverless SQL engine. Zero fixed costs, pay-per-query. Replaces Redshift. |
-| **Data Layers** | **Raw -> Dev -> Prod** | - | **Raw**: Ingested JSON. **Dev**: Processed Parquet. **Prod**: Aggregated Views. |
-| **Visualization** | **OWOX + Looker Studio** | - | OWOX connects Athena results to Looker. Two data marts created: Dev and Prod. |
-| **Environments** | **Logical Separation** | - | `dev` and `prod` prefixes within S3 and separate Athena Databases (`openaq_dev`, `openaq_prod`). |
+| **Orchestration** | **Airflow (LocalExecutor)** | 2.7+ | Runs efficiently on local Docker. No need for Redis/Celery complexity. |
+| **Ingestion** | **Airflow PythonOperator** | - | Lightweight API extraction logic runs locally to fetch JSON. |
+| **Transformation** | **AWS Glue ETL (Spark/Python)** | 4.0 | **Offloads compute to AWS.** Handles massive datasets/backfills without crashing the local Docker container. |
+| **Catalog** | **AWS Glue Crawler** | - | Automates schema discovery for the Parquet files in S3. |
+| **Storage** | **AWS S3** | Standard | Cloud-native storage accessible by Glue, Athena, and OWOX. |
+| **Warehouse** | **Amazon Athena** | V3 | Serverless SQL engine for querying S3 data. Pay-per-query. |
+| **Data Layers** | **raw -> dev -> prod** | - | Strict lineage: Raw (JSON) -> Dev (Parquet) -> Prod (Views). |
 
-## Data Architecture
+## Data Architecture (S3 Zones)
 
-### Layering Strategy (`raw`, `dev`, `prod`)
+| Zone | Path | Format | Engine | Description |
+| --- | --- | --- | --- | --- |
+| **Raw** | `s3://{bucket}/raw/` | JSON | Airflow | **Immutable Landing Zone.** Exact API response payload. Partitioned by date. |
+| **Dev** | `s3://{bucket}/dev/` | Parquet | **AWS Glue** | **Processed Zone.** Cleaned, deduplicated, and typed data. Compressed (Snappy). |
+| **Prod** | `s3://{bucket}/prod/` | SQL View | Athena | **Serving Zone.** Aggregated views (e.g., Daily Averages) for visualization. |
 
-| Layer | S3 Path Pattern | Format | Purpose |
-| --- | --- | --- | --- |
-| **Raw** | `s3://{bucket}/{env}/raw/year={Y}/month={M}/day={D}/` | JSON | **Immutable Landing Zone.** Exact copy of API response. Allows replay if logic changes. |
-| **Dev** | `s3://{bucket}/{env}/dev/year={Y}/month={M}/day={D}/` | Parquet | **Processed Zone.** Deduplicated, type-cast, compressed (Snappy). Optimized for Athena. |
-| **Prod** | *(Virtual via Athena)* | SQL View | **Serving Zone.** Filtered, aggregated views exposed to OWOX/Looker. |
+## Data Flow Pipeline
 
-### Data Models
+1. **Extract (Local):** Airflow triggers `extract_raw_data`. Fetches API data and uploads `.json` to `s3://.../raw/`.
+2. **Transform (Cloud):** Airflow triggers **Glue Job** `openaq_raw_to_dev`.
+* Reads JSON from `raw`.
+* Flattens coordinates and converts types.
+* Writes Parquet to `s3://.../dev/`.
 
-**1. Measurements (Dev Layer - Parquet)**
 
-* `location_id` (int)
-* `parameter` (string)
-* `value` (float)
-* `unit` (string)
-* `datetime` (timestamp)
-* `coordinates` (struct<lat, lon>)
-
-**2. Prod Views (Serving Layer - Athena SQL)**
-
-* `view_latest_aqi`: Filters out negative values, joins with location metadata.
-* `view_daily_average`: Pre-aggregates data for faster OWOX querying.
+3. **Catalog (Cloud):** Airflow triggers **Glue Crawler**. Updates Athena table definitions.
+4. **Validate (Cloud):** Airflow triggers Athena query to verify data quality in `dev`.
+5. **Serve (Cloud):** OWOX/Looker queries `openaq_prod` views which read from `dev` tables.
 
 ## Technology Stack Details
 
 ### Core Technologies
 
-* **Language:** Python 3.10+
-* **Orchestrator:** Apache Airflow 2.7+ (LocalExecutor mode)
-* **Infrastructure:** AWS (S3, Athena, Glue, EC2, IAM)
-* **IaC:** None (Manual/Scripted setup for personal project)
+* **Orchestrator:** Apache Airflow (Docker Compose)
+* **ETL Engine:** AWS Glue (Serverless Spark/Python Shell)
+* **Query Engine:** Amazon Athena
+* **Language:** Python 3.10+ (Local), PySpark (Glue)
 
 ### Integration Points
 
-* **Airflow → S3:** `boto3` for file uploads (supports `env` parameter).
-* **Airflow → Athena:** `awswrangler` or `boto3` to execute DDL for Views.
-* **OWOX → Athena:** JDBC/ODBC connection via IAM User. Two connections configured: `OpenAQ Dev` and `OpenAQ Prod`.
+* **Airflow → AWS Glue:** Uses `boto3` to `start_job_run` and polls for completion.
+* **Airflow → S3:** Uploads raw JSON files.
+* **Glue → S3:** Reads JSON, writes Parquet.
 
 ## Implementation Patterns
 
-### Category: Naming Patterns
+### 1. Naming & Consistency
 
-* **S3 Paths:** Lowercase, Hive-partitioned. Example: `raw/year=2024/month=01/`
-* **Athena Databases:** `openaq_{env}` (e.g., `openaq_dev`, `openaq_prod`).
-* **Athena Views:** Prefix `view_`. Example: `view_prod_daily_summary`.
+* **S3 Partitions:** Hive-style strictly enforced (`/year=YYYY/month=MM/day=DD/`).
+* **Glue Jobs:** Naming convention `job_{source}_{target}` (e.g., `job_raw_to_dev`).
+* **Regions:** Fixed to `ap-southeast-1`.
 
-### Category: Structure Patterns
+### 2. Security (Local Context)
 
-* **ETL Idempotency:** All tasks must be idempotent. Re-running a DAG for a past date should overwrite/replace data in S3 for that partition, not duplicate it.
-* **Config Management:** `config.conf` accepts `ENV` variable to switch paths.
-
-## Security Architecture
-
-* **IAM User `owox-integrator`:**
-* Policy: `AWSQuicksightAthenaAccess` (managed) + Inline Policy for `s3:GetObject`/`ListBucket` on specific bucket.
-
-
-* **EC2 Instance Profile:**
-* Role attached to EC2 allows `s3:PutObject`, `glue:StartCrawler`, `athena:StartQueryExecution`.
-* **No AWS keys stored on EC2.**
-
-
-
-## Development Environment
-
-### Prerequisites
-
-* Docker & Docker Compose
-* Python 3.10+
-* AWS CLI configured (for local testing)
-
-### Setup Commands
-
-```bash
-# 1. Clone repo
-git clone ...
-# 2. Configure env
-cp config/config.conf.example config/config.conf
-# 3. Start Lean Airflow
-docker-compose up -d
-
-```
+* **Credentials:** Injected via `.env` file to Docker.
+* **IAM User:** `openaq-local-dev` requires `glue:StartJobRun`, `glue:GetJobRun`, `s3:PutObject`, `s3:GetObject`.
 
 ## Architecture Decision Records (ADRs)
 
-### ADR-001: LocalExecutor for Orchestration
+### ADR-001: Migration to Local Docker
 
-**Context:** AWS Free Tier limits RAM to 1GB. Standard Airflow Celery architecture requires Redis and multiple containers, exceeding this limit.
-**Decision:** Use `LocalExecutor`.
-**Consequences:** Loss of horizontal scaling (acceptable for personal project). Significant RAM savings.
+**Context:** EC2 Free Tier has RAM limits.
+**Decision:** Run Airflow locally.
+**Consequences:** Zero compute cost for orchestration.
 
-### ADR-002: Athena over Redshift
+### ADR-003: Offloading Transformation to Glue
 
-**Context:** Redshift has high fixed costs ($0.25/hr+).
-**Decision:** Use Amazon Athena.
-**Consequences:** Pay-per-query model fits "low volume" requirement perfectly. Slightly higher latency for dashboards, but acceptable.
+**Context:** Local Docker container may run out of memory when processing large historical backfills (e.g., 1 year of data).
+**Decision:** Use AWS Glue ETL Jobs for the Transformation step.
+**Consequences:**
 
-### ADR-003: Raw/Dev/Prod Layering
-
-**Context:** Need clear separation between ingested data and reporting data, and ability to test changes safely.
-**Decision:** Use `raw` (JSON), `dev` (Parquet), `prod` (Views) naming convention with logical separation (prefixes).
-**Consequences:** Clear lineage. OWOX connects to specific environment views, protecting dashboards from breaking changes.
+* (+) Local machine stays responsive.
+* (+) Can scale to process terabytes of data if needed.
+* (-) Small cost associated with Glue DPU-hours (though within Free Tier limits for small runs).
+* (-) Slightly more complex deployment (need to sync scripts to S3).
 
 ```
 
