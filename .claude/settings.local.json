@@ -11,7 +11,8 @@
       "mcp__serena__replace_symbol_body",
       "mcp__serena__insert_after_symbol",
       "mcp__serena__find_symbol",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(echo:*)"
     ]
   }
 }

@@ -1,0 +1,41 @@
+# Python packages from pip install -t .
+boto3/
+botocore/
+pandas/
+numpy/
+requests/
+pytz/
+urllib3/
+dateutil/
+jmespath/
+s3transfer/
+certifi/
+charset_normalizer/
+idna/
+tzdata/
+
+# Package metadata
+*.dist-info/
+
+# Compiled Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ZIP package (commit only handler + ETL modules + requirements.txt)
+openaq_fetcher.zip
+
+# Config
+config.conf
+
+bin/

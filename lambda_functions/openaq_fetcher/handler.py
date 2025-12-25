@@ -15,10 +15,10 @@ import os
 from datetime import datetime, timedelta
 import boto3
 
-# Import extraction modules
-from extract_location import extract_location
-from extract_sensor_measurement import extract_sensor_measurement
-from openaq_etl import connect_openaq
+# Import extraction modules (absolute imports for Lambda compatibility)
+from etls.extract_location import extract_location
+from etls.extract_sensor_measurement import extract_sensor_measurement
+from etls.openaq_etl import connect_openaq
 
 
 def lambda_handler(event, context):

@@ -10,11 +10,14 @@ CONFIG_FILE = PROJECT_ROOT / "config" / "config.conf"
 config = configparser.ConfigParser()
 BASE_URL = "https://api.openaq.org/v3"
 
-# Load configuration file
+# Load configuration file (with Lambda fallback)
 if CONFIG_FILE.exists():
     config.read(CONFIG_FILE)
 else:
-    raise FileNotFoundError(f"Configuration file not found: {CONFIG_FILE}")
+    # Lambda mode: use environment variables instead
+    if not os.getenv('PIPELINE_ENV'):
+        raise FileNotFoundError(f"Configuration file not found: {CONFIG_FILE}")
+    # If env var exists, skip config file (Lambda will provide env vars)
 
 
 # ============================================================================
@@ -54,8 +57,17 @@ DATABASE_URL = f"postgresql://{DATABASE_USERNAME}:{DATABASE_PASSWORD}@{DATABASE_
 INPUT_PATH = config.get("file_paths", "input_path", fallback="/opt/airflow/data/input")
 OUTPUT_PATH = config.get("file_paths", "output_path", fallback="/opt/airflow/data/output")
 
-os.makedirs(INPUT_PATH, exist_ok=True)
-os.makedirs(OUTPUT_PATH, exist_ok=True)
+# In AWS Lambda, /opt is read-only. Use /tmp for writable storage.
+if os.getenv("AWS_EXECUTION_ENV") or os.getenv("LAMBDA_TASK_ROOT"):
+    INPUT_PATH = "/tmp/input"
+    OUTPUT_PATH = "/tmp/output"
+
+try:
+    os.makedirs(INPUT_PATH, exist_ok=True)
+    os.makedirs(OUTPUT_PATH, exist_ok=True)
+except OSError:
+    # Ignore directory creation errors in read-only environments
+    pass
 
 
 # ============================================================================
