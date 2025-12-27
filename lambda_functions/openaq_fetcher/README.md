@@ -116,7 +116,7 @@ cd lambda_functions/openaq_fetcher
 # 2. Build deployment package
 rm -rf deployment && mkdir deployment
 
-pip install -r requirements.txt -t deployment --upgrade
+pip install -r requirements.txt -t deployment --upgrade --no-user
 
 cp handler.py extract_api.py s3_uploader.py deployment/
 

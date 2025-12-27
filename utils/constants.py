@@ -36,8 +36,17 @@ ENV_FOLDER_MAP = {
 # Nếu ENV là 'staging' hay gì khác lạ, nó sẽ fallback về 'aq_dev' để an toàn.
 CURRENT_ENV_FOLDER = ENV_FOLDER_MAP.get(ENV, 'aq_dev')
 
-# Folder chứa dữ liệu thô (Input/Backup)
-RAW_FOLDER = 'aq_raw'
+# Raw folders - separated by environment for test/prod isolation
+RAW_FOLDER_MAP = {
+    'dev': 'aq_raw_test',
+    'prod': 'aq_raw_prod'
+}
+
+# Current raw folder based on environment
+RAW_FOLDER = RAW_FOLDER_MAP.get(ENV, 'aq_raw_test')
+
+# Legacy raw folder (deprecated - for backward compatibility)
+RAW_FOLDER_LEGACY = 'aq_raw'
 
 # ============================================================================
 # DATABASE CONFIGURATION
@@ -147,8 +156,8 @@ def print_config_summary():
     print("=" * 60)
     print("CONFIGURATION SUMMARY")
     print("=" * 60)
-    print(f"Env: {ENV}")
+    print(f"Environment: {ENV}")
+    print(f"Raw Folder: {RAW_FOLDER} (test: aq_raw_test, prod: aq_raw_prod)")
     print(f"Marts Folder: {CURRENT_ENV_FOLDER}")
-    print(f"Raw Folder: {RAW_FOLDER}")
     print(f"Database: {DATABASE_USERNAME}@{DATABASE_HOST}:{DATABASE_PORT}/{DATABASE_NAME}")
     print("=" * 60)

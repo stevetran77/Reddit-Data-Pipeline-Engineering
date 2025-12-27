@@ -1,0 +1,17 @@
+{
+  "Rules": [
+    {
+      "ID": "DeleteTestRawDataAfter7Days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "aq_raw_test/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 1
+      }
+    }
+  ]
+}

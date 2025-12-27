@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import pandas as pd
+import json
 
 # Import các biến môi trường và folder từ constants
 from utils.constants import (
@@ -28,7 +29,7 @@ from etls.openaq_etl import (
 )
 
 # Import S3 upload functions
-from utils.aws_utils import upload_to_s3
+from utils.aws_utils import upload_to_s3, get_s3_client
 
 # Import Glue job utilities for triggering transform job
 from utils.glue_utils import start_glue_job
@@ -139,8 +140,26 @@ def openaq_pipeline(file_name: str, city: str = None, country: str = None,
         # Structure: aq_raw/year/month/day/hour/raw_measurements.json
         raw_key = f"{RAW_FOLDER}/{now.year}/{now.strftime('%m')}/{now.strftime('%d')}/{now.strftime('%H')}/raw_{file_name}.json"
 
-        # Upload enriched DataFrame to S3
-        upload_to_s3(df_enriched, AWS_BUCKET_NAME, raw_key, format='json')
+        # Wrap data in API response format (like data/ folder structure)
+        wrapped_data = {
+            'meta': {
+                'name': 'openaq-api',
+                'website': 'https://api.openaq.org/v3',
+                'found': len(df_enriched),
+                'extracted_at': now.isoformat()
+            },
+            'results': df_enriched.to_dict(orient='records')
+        }
+
+        # Upload wrapped data to S3 as single JSON (not NDJSON)
+        s3_client = get_s3_client()
+        s3_client.put_object(
+            Bucket=AWS_BUCKET_NAME,
+            Key=raw_key,
+            Body=json.dumps(wrapped_data, default=str),
+            ContentType='application/json'
+        )
+        print(f"[SUCCESS] Uploaded {len(df_enriched)} records to s3://{AWS_BUCKET_NAME}/{raw_key}")
 
         result = {
             'status': 'SUCCESS',

@@ -13,12 +13,17 @@ Airflow 2.7.1 ETL pipeline extracting air quality data from OpenAQ API v3 for Vi
 OpenAQ API → Airflow (extract) → S3 Raw (JSON.gz) → Glue Spark (transform) → S3 Marts (Parquet) → Athena → OWOX → Looker
 ```
 
-### Three-Zone S3 Structure
-- `s3://openaq-data-pipeline/aq_raw/` - Immutable raw JSON.gz from API
+### Four-Zone S3 Structure
+- `s3://openaq-data-pipeline/aq_raw_test/` - Test raw data (7-day retention)
+- `s3://openaq-data-pipeline/aq_raw_prod/` - Production raw data (immutable)
 - `s3://openaq-data-pipeline/aq_dev/` - Dev zone for Parquet (testing ETL changes)
 - `s3://openaq-data-pipeline/aq_prod/` - Prod zone for Parquet (production dashboards)
 
-Environment selection: `PIPELINE_ENV` env var (`dev`|`prod`), defaults to `dev`. See [utils/constants.py](utils/constants.py) for `ENV_FOLDER_MAP`.
+Environment selection: `PIPELINE_ENV` env var (`dev`|`prod`), defaults to `dev`. See [utils/constants.py](utils/constants.py) for `RAW_FOLDER_MAP` and `ENV_FOLDER_MAP`.
+
+**Raw Data Retention**:
+- Test data (`aq_raw_test/`): Auto-deleted after 7 days via S3 lifecycle policy
+- Prod data (`aq_raw_prod/`): Retained indefinitely
 
 ## Critical Setup Requirements
 
@@ -142,6 +147,50 @@ PythonSensor(
 ```
 Sensors poll AWS services (Glue Crawler, Glue Job) until completion. `mode='poke'` blocks the worker.
 
+### S3 Upload Pattern
+[pipelines/openaq_pipeline.py](pipelines/openaq_pipeline.py#L140-L160): Raw data uploaded as wrapped JSON matching API response format
+- **Structure**: Matches `data/` folder format with `meta` + `results` wrapper
+- **Location**: `s3://bucket/aq_raw/year/month/day/hour/raw_{file_name}.json`
+- **Format**: Single JSON file (not NDJSON) with metadata header
+- **Contents**: API response structure with `name`, `website`, `found`, `extracted_at` in meta; measurement records in results array
+
+```json
+{
+  "meta": {"name": "openaq-api", "website": "https://api.openaq.org/v3", "found": 312, "extracted_at": "2024-01-15T10:30:00"},
+  "results": [{"location_id": 18, "parameter": "pm25", "value": 45.5, ...}, ...]
+}
+```
+
+## Lambda Data Schema Pattern
+
+### Critical Understanding: Metadata Fields Are Null in Lambda Output
+
+Lambda extracts raw measurements **WITHOUT enrichment** because Lambda can't use pandas. The NDJSON records written to S3 have this structure:
+
+```json
+{
+  "location_id": 18,
+  "parameter": "pm25",
+  "value": 45.5,
+  "unit": "µg/m³",
+  "datetime": "2024-01-15T10:00:00+07:00",
+  "latitude": null,      ← SET TO NULL BY LAMBDA
+  "longitude": null,     ← SET TO NULL BY LAMBDA
+  "city": null,          ← SET TO NULL BY LAMBDA
+  "country": null        ← SET TO NULL BY LAMBDA
+}
+```
+
+**Why null?** The enrichment function `enrich_measurements_with_metadata()` requires pandas and is marked "only for Airflow/Glue". Glue job later joins these records with location coordinates from the location list.
+
+**Data enrichment flow**:
+1. **Lambda** (`lambda_functions/openaq_fetcher/etls/openaq_etl.py` line 112-136): Extracts measurements with null metadata fields
+2. **S3 Raw** (`aq_raw/`): Stores NDJSON with null metadata
+3. **Glue Job** (`glue_jobs/process_openaq_raw.py` line 178-195): Joins with location metadata to fill coordinates
+4. **S3 Marts** (`aq_dev/` or `aq_prod/`): Stores enriched Parquet with populated coordinates
+
+Test data should match Lambda output format - NDJSON with null metadata. See [lambda_functions/openaq_fetcher/test_data_sample.ndjson](lambda_functions/openaq_fetcher/test_data_sample.ndjson).
+
 ## Common Pitfalls
 
 1. **Missing config file**: If you see `FileNotFoundError: config/config.conf not found`, you forgot step 1 in setup
@@ -150,6 +199,7 @@ Sensors poll AWS services (Glue Crawler, Glue Job) until completion. `mode='poke
 4. **NumPy version**: Must use `numpy<2.0.0` (see requirements.txt) - NumPy 2.x breaks PySpark 3.4.1 compatibility
 5. **Java for Spark**: Dockerfile installs OpenJDK 17 and sets `JAVA_HOME` - required for local PySpark testing
 6. **Environment variables in Glue**: Glue jobs use `--arguments` (not env vars). Pass `--env dev|prod` explicitly.
+7. **Lambda test data with filled metadata**: Test data should have `null` metadata fields, not populated ones. Glue job enriches this data later.
 
 ## File Navigation Quick Reference
 
