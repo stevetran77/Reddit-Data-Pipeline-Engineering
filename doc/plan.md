@@ -104,7 +104,7 @@ OpenAQ API → Airflow (Python extraction) → S3 (Parquet) → Glue Crawler →
 
 ---
 
-### Sub-task 1.2: Configure Airflow (30 min)
+### Sub-task 1.2: Configure Airflow (30 min) (Done)
 
 **Objective:** Set up Airflow configuration and database
 
@@ -163,45 +163,39 @@ OpenAQ API → Airflow (Python extraction) → S3 (Parquet) → Glue Crawler →
 ```bash
 aws s3 ls s3://openaq-data-pipeline/ --region ap-southeast-1
 
-# Expected folders: airquality/, aq_dev/, athena-results/
+# Expected folders: aq_prod/, aq_dev/, aq_raw/, aq_raw_test, athena-results/
 ```
 
-**Verify Glue Database:**
+**Verify Glue Databases (Dev & Prod):**
 ```bash
-aws glue get-database \
-  --name openaq_database \
-  --region ap-southeast-1
+aws glue get-database --name openaq_dev --region ap-southeast-1
+aws glue get-database --name openaq_prod --region ap-southeast-1
 ```
 
-**Verify Glue Job:**
+**Verify Glue Jobs (Dev & Prod):**
 ```bash
-aws glue get-job \
-  --job-name openaq_transform_measurements_prod \
-  --region ap-southeast-1
+aws glue get-job --job-name openaq_transform_measurements_dev --region ap-southeast-1
+aws glue get-job --job-name openaq_transform_measurements_prod --region ap-southeast-1
 ```
 
-**Verify Glue Crawler:**
+**Verify Glue Crawlers (Dev & Prod):**
 ```bash
-aws glue get-crawler \
-  --name openaq_s3_crawler \
-  --region ap-southeast-1
+aws glue get-crawler --name openaq_s3_crawler_dev --region ap-southeast-1
+aws glue get-crawler --name openaq_s3_crawler_prod --region ap-southeast-1
 ```
 
-**Verify Athena Database:**
+**Verify Athena Databases (Dev & Prod):**
 ```bash
-aws athena start-query-execution \
-  --query-string "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'openaq_database';" \
-  --query-execution-context Database=openaq_database \
-  --result-configuration OutputLocation=s3://openaq-data-pipeline/athena-results/ \
-  --region ap-southeast-1
+aws athena start-query-execution --query-string "SELECT 1;" --query-execution-context Database=openaq_dev --result-configuration OutputLocation=s3://openaq-data-pipeline/athena-results/ --region ap-southeast-1
+aws athena start-query-execution --query-string "SELECT 1;" --query-execution-context Database=openaq_prod --result-configuration OutputLocation=s3://openaq-data-pipeline/athena-results/ --region ap-southeast-1
 ```
 
 **Success Criteria:**
-- ✅ S3 bucket accessible with required folders
-- ✅ Glue database exists
-- ✅ Glue job deployed
-- ✅ Glue crawler configured
-- ✅ Athena database created
+- ✅ S3 bucket accessible with folders: aq_raw_test/, aq_raw_prod/, aq_dev/, aq_prod/
+- ✅ Glue databases exist: openaq_dev, openaq_prod
+- ✅ Glue jobs deployed: openaq_transform_measurements_dev, openaq_transform_measurements_prod
+- ✅ Glue crawlers configured: openaq_s3_crawler_dev, openaq_s3_crawler_prod
+- ✅ Athena databases exist: openaq_dev, openaq_prod
 
 ---
 
@@ -343,16 +337,19 @@ airflow tasks xcom-get openaq_to_athena_pipeline extract_all_vietnam_locations r
 airflow tasks test openaq_to_athena_pipeline trigger_glue_transform_job 2024-12-28
 ```
 
-**Expected output:**
+**Expected output (Dev environment):**
 ```
-[START] Triggering Glue Transform Job: openaq_transform_measurements_prod
+[START] Triggering Glue Transform Job: openaq_transform_measurements_dev
 [INFO] Extraction metadata: locations=53, records=1520
 [INFO] Glue Job Arguments:
-  --input_path: s3://openaq-data-pipeline/airquality/
+  --input_path: s3://openaq-data-pipeline/aq_raw_test/
   --output_path: s3://openaq-data-pipeline/aq_dev/marts/vietnam/
+  --env: dev
 [OK] Glue job triggered successfully
 [INFO] Job run ID: jr_abc123xyz
 ```
+
+**Note:** For production (PIPELINE_ENV=prod), uses openaq_transform_measurements_prod with aq_raw_prod/ input and aq_prod/ output
 
 **Success Criteria:**
 - ✅ Task completes without errors
@@ -372,12 +369,10 @@ airflow tasks test openaq_to_athena_pipeline wait_glue_transform_task 2024-12-28
 
 **Monitor via AWS CLI:**
 ```bash
-# Get job run ID from XCom
-JOB_RUN_ID=$(airflow tasks xcom-get openaq_to_athena_pipeline trigger_glue_transform_job run_id 2024-12-28)
+# Get job run  (Dev)
+aws glue get-job-run --job-name openaq_transform_measurements_dev --run-id $JOB_RUN_ID --region ap-southeast-1 --query 'JobRun.[JobRunState,ExecutionTime,ErrorMessage]'
 
-# Check status
-aws glue get-job-run \
-  --job-name openaq_transform_measurements_prod \
+# For production, use: openaq_transform_measurements_prod
   --run-id $JOB_RUN_ID \
   --region ap-southeast-1 \
   --query 'JobRun.[JobRunState,ExecutionTime,ErrorMessage]'
@@ -498,7 +493,7 @@ airflow dags trigger openaq_to_athena_pipeline --exec-date 2024-12-28
 ### Sub-task 4.2: Validate with Athena Queries (30 min)
 
 **Objective:** Verify data is queryable and correct
-
+ (Dev - use openaq_prod for production)
 **Query 1: Check data availability**
 ```sql
 SELECT COUNT(*) as total_records
@@ -542,7 +537,9 @@ FROM openaq_dev.aq_vietnam
 WHERE year = '2024' AND month = '12' AND day = '28'
 LIMIT 10;
 ```
+Note:** Replace `openaq_dev` with `openaq_prod` for production environment queries
 
+**
 **Success Criteria:**
 - ✅ All queries execute successfully
 - ✅ Query 1: Records > 0
@@ -820,12 +817,14 @@ airflow tasks test openaq_to_athena_pipeline validate_athena_data 2024-12-28
 **View logs:**
 ```bash
 docker-compose logs -f airflow-scheduler
-docker-compose logs -f airflow-webserver
+docker-compose logs -f  (Dev environment):**
+```bash
+aws glue get-job-runs --job-name openaq_transform_measurements_dev --max-results 5 --region ap-southeast-1
 ```
 
-**Check Glue job status:**
+**For production:**
 ```bash
-aws glue get-job-runs \
+aws glue get-job-runs --job-name openaq_transform_measurements_prod --max-results 5ws glue get-job-runs \
   --job-name openaq_transform_measurements_prod \
   --max-results 5 \
   --region ap-southeast-1

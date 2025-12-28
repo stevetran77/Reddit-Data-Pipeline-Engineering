@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, '/opt/airflow/')
 
 from airflow.operators.python import PythonOperator
-from datetime import datetime
+from datetime import datetime, timedelta
 from pipelines.openaq_pipeline import openaq_pipeline
 
 def create_extract_task(dag, city: str, country: str, lookback_hours: int = 24, retries: int = 3, max_retries: int = 3):
@@ -41,7 +41,7 @@ def create_extract_task(dag, city: str, country: str, lookback_hours: int = 24, 
         },
         dag=dag,
         retries=retries,
-        retry_delay=datetime(minutes=5),  # Wait 5 min between retries
+        retry_delay=timedelta(minutes=5),  # Wait 5 min between retries
         on_failure_callback=lambda context: print(f"Failed extract task: {context['task_instance'].task_id}")
     )
 
