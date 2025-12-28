@@ -155,7 +155,7 @@ OpenAQ API → Airflow (Python extraction) → S3 (Parquet) → Glue Crawler →
 
 ---
 
-### Sub-task 1.3: Verify AWS Infrastructure (30 min)
+### Sub-task 1.3: Verify AWS Infrastructure (30 min) (Done)
 
 **Objective:** Confirm all required AWS resources exist and are accessible
 
