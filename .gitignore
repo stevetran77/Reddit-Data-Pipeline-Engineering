@@ -26,3 +26,7 @@ lambda_functions/**/extract_location.py
 lambda_functions/**/extract_sensor_measurement.py
 lambda_functions/**/openaq_etl.py
 lambda_functions/**/constants.py
+
+.claude/
+
+.vscode/
