@@ -83,9 +83,14 @@ cd lambda_functions\openaq_fetcher
 # 2. Ensure config is uploaded to S3
 aws s3 cp ..\..\config\config.conf s3://openaq-data-pipeline/config/config.conf
 
-# 3. Run deployment script
+# 3. Run deployment script from PowerShell (NOT Git Bash)
+powershell -ExecutionPolicy Bypass -Command "Set-Location '.'; & '.\deploy.ps1'"
+
+# OR if using PowerShell directly:
 .\deploy.ps1
 ```
+
+**IMPORTANT**: Execute in **PowerShell**, not Git Bash. Git Bash will fail with `command not found`.
 
 **What the script does**:
 1. Creates IAM role `lambda-openaq-role` with S3 and CloudWatch permissions (if not exists)
@@ -105,10 +110,27 @@ aws s3 cp ..\..\config\config.conf s3://openaq-data-pipeline/config/config.conf
 [INFO] Copying Lambda code...
 [INFO] Creating ZIP package...
 [OK] Deployment package created: openaq-fetcher.zip
-[INFO] Updating Lambda function code...
+[INFO] Checking if Lambda function exists...
 [OK] Function code updated
 [OK] Environment variables set
 [SUCCESS] Lambda Function Deployed!
+================================================
+Function Name: openaq-fetcher
+Runtime: Python 3.11
+Handler: handler.lambda_handler
+Memory: 1024 MB
+Timeout: 300 seconds
+Region: ap-southeast-1
+================================================
+[OK] Done!
+```
+
+**Verify Deployment**:
+```powershell
+# Check Lambda function last modified timestamp
+aws lambda get-function --function-name openaq-fetcher --region ap-southeast-1 | grep -A 1 LastModified
+
+# Expected: Recent timestamp showing deployment was successful
 ```
 
 ### Method 2: Manual Deployment (Linux/Mac/Windows)
@@ -321,6 +343,67 @@ Expected:
 2025-12-28 07:30:45   15234 aq_raw/2025/12/28/07/raw_vietnam_national_test.json
 ```
 
+## CRITICAL: Parameter Filtering Fix (December 2025)
+
+### Issue Identified
+A critical bug was discovered in the parameter filtering logic that prevented extraction of HCMC (Ho Chi Minh City) air quality data.
+
+**Root Cause**: Parameter name mismatch between required parameters and API responses:
+- Required parameter: `'PM2.5'` (with decimal)
+- API returns: `'pm25'` (without decimal)
+- Old logic: `'pm2.5' in 'pm25'` → **FALSE** ❌ (FILTERED OUT)
+- Fixed logic: Normalize both by removing decimals → **TRUE** ✓ (INCLUDED)
+
+### What Was Fixed
+**File**: `extract_api.py` - `filter_active_sensors()` function (lines 167-179)
+
+**Before** (Buggy):
+```python
+if any(req.lower() in param_name.lower() for req in required_parameters):
+```
+
+**After** (Fixed):
+```python
+param_normalized = param_name.lower().replace('.', '')
+for req in required_parameters:
+    req_normalized = req.lower().replace('.', '')
+    if req_normalized == param_normalized or req_normalized in param_normalized:
+        # Include this sensor
+```
+
+### Impact
+- **HCMC Location**: ID 3276359 (CMT8) - NOW EXTRACTED ✓
+- **HCMC PM2.5 Sensor**: ID 11357424 - NOW EXTRACTED ✓
+- **Data Coverage**: Expanded from Hanoi-only (3 locations) to Hanoi + HCMC (4 locations)
+- **Records**: Expected +72 hourly PM2.5 measurements from HCMC
+
+### Deployment Note
+The `deploy.ps1` script automatically includes this fix. When you deploy, ensure you're deploying the latest version with the fix applied to both:
+1. `extract_api.py` (source file)
+2. `deployment/extract_api.py` (deployment copy)
+
+**Verify the fix is in place**:
+```bash
+grep -A 10 "param_normalized = param_name" extract_api.py | head -15
+# Should show the normalization logic with .replace('.', '')
+```
+
+### Validation After Deployment
+After deploying the fixed Lambda, HCMC data should appear in S3:
+
+```bash
+# Check for HCMC location ID (3276359) in latest raw file
+aws s3 cp s3://openaq-data-pipeline/aq_raw/2025/12/29/XX/raw_vietnam_national_*.json - \
+  | grep 3276359 | head -5
+
+# Expected: >70 records from HCMC
+```
+
+### Related Documentation
+See `LAMBDA_BUG_FIX_REPORT.md` for detailed analysis and investigation.
+
+---
+
 ## Integration with Airflow
 
 ### Airflow DAG Configuration
@@ -468,21 +551,42 @@ aws iam attach-role-policy \
 
 ## Deployment Checklist
 
+### Pre-Deployment
 - [ ] Config file uploaded to S3: `s3://openaq-data-pipeline/config/config.conf`
 - [ ] Config contains `openaq_api_key` in `[api_keys]` section
+- [ ] Parameter filtering fix applied to `extract_api.py` (check for `param_normalized` logic)
 - [ ] Lambda execution role `lambda-openaq-role` created
 - [ ] Role has `AmazonS3FullAccess` policy (or custom S3 read/write policy)
 - [ ] Role has `AWSLambdaBasicExecutionRole` policy (for CloudWatch logging)
-- [ ] Lambda function `openaq-fetcher` deployed with:
+
+### Deployment Steps
+- [ ] Navigate to: `cd lambda_functions/openaq_fetcher`
+- [ ] Run: `powershell -ExecutionPolicy Bypass -Command "Set-Location '.'; & '.\deploy.ps1'"`
+- [ ] Wait for `[SUCCESS] Lambda Function Deployed!` message
+- [ ] Verify: `aws lambda get-function --function-name openaq-fetcher --region ap-southeast-1 | grep LastModified`
+
+### Post-Deployment Verification
+- [ ] Lambda function configuration:
   - [ ] Runtime: Python 3.11
   - [ ] Handler: `handler.lambda_handler`
   - [ ] Timeout: 300 seconds
   - [ ] Memory: 1024 MB
-- [ ] Lambda tested with test event
-- [ ] CloudWatch logs visible and showing successful execution
+- [ ] Lambda tested with test event (use Test Event 2: Full Vietnam)
+- [ ] CloudWatch logs visible: `/aws/lambda/openaq-fetcher`
+- [ ] Logs show successful execution with all `[OK]` messages
 - [ ] Data uploaded to S3 `aq_raw/` folder
-- [ ] Airflow connection `aws_default` configured
+- [ ] **CRITICAL**: Verify HCMC data (location 3276359) appears in S3 raw data
+  ```bash
+  aws s3 cp s3://openaq-data-pipeline/aq_raw/2025/12/29/XX/raw_vietnam_national_*.json - | grep 3276359 | wc -l
+  # Expected: >70 records
+  ```
+
+### Airflow Integration
+- [ ] Airflow connection `aws_default` configured with AWS credentials
 - [ ] Airflow DAG uses `LambdaInvokeFunctionOperator`
+- [ ] DAG trigger test completed successfully
+- [ ] All downstream tasks (Glue, Athena) executed without errors
+- [ ] Athena queries return HCMC data alongside Hanoi data
 
 ## File Structure
 
@@ -509,6 +613,56 @@ lambda_functions/openaq_fetcher/
 7. Monitor CloudWatch logs for performance
 8. Adjust timeout/memory based on metrics
 
+## Quick Reference - Common Commands
+
+### Deploy Lambda with Fix
+```powershell
+# From Git Bash or Command Prompt:
+cd lambda_functions\openaq_fetcher
+
+# Deploy (execute in PowerShell)
+powershell -ExecutionPolicy Bypass -Command "Set-Location '.'; & '.\deploy.ps1'"
+```
+
+### Verify Deployment
+```bash
+# Check Lambda was updated
+aws lambda get-function --function-name openaq-fetcher --region ap-southeast-1 | grep LastModified
+
+# View latest CloudWatch logs
+aws logs tail /aws/lambda/openaq-fetcher --follow --region ap-southeast-1
+```
+
+### Validate Data Extraction
+```bash
+# List all raw files
+aws s3 ls s3://openaq-data-pipeline/aq_raw/2025/12/29/ --recursive | tail -5
+
+# Check HCMC location data exists (should have >70 records)
+aws s3 cp s3://openaq-data-pipeline/aq_raw/2025/12/29/XX/raw_vietnam_national_*.json - | grep 3276359 | wc -l
+```
+
+### Test Lambda Manually
+```bash
+# Invoke with test event
+aws lambda invoke \
+  --function-name openaq-fetcher \
+  --payload '{"file_name":"test_manual","vietnam_wide":true,"lookback_hours":24,"required_parameters":["PM2.5","PM10"]}' \
+  --region ap-southeast-1 \
+  response.json
+
+# View response
+cat response.json
+```
+
+### Troubleshoot Parameter Filtering
+```bash
+# Check if fix is in place
+grep -n "param_normalized = param_name" extract_api.py
+
+# Should show line ~170 with the normalization logic
+```
+
 ## Additional Resources
 
 - [AWS Lambda Python Runtime](https://docs.aws.amazon.com/lambda/latest/dg/lambda-python.html)
@@ -516,3 +670,19 @@ lambda_functions/openaq_fetcher/
 - [Boto3 S3 Documentation](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html)
 - [OpenAQ API Documentation](https://api.openaq.org/)
 - [Apache Airflow Lambda Operator](https://airflow.apache.org/docs/apache-airflow-providers-amazon/stable/operators/lambda.html)
+
+---
+
+## Recent Changes (December 2025)
+
+**Parameter Filtering Bug Fix**:
+- Fixed critical issue where HCMC location wasn't being extracted
+- Updated `filter_active_sensors()` to handle parameter name normalization
+- Parameter matching now handles decimal point differences (PM2.5 vs pm25)
+- See `LAMBDA_BUG_FIX_REPORT.md` for detailed analysis
+
+**Updated Documentation**:
+- Added PowerShell execution instructions to deployment section
+- Added post-deployment HCMC verification checklist
+- Added quick reference commands for common tasks
+- Added troubleshooting steps for parameter filtering
