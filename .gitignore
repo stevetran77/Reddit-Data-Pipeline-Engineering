@@ -30,3 +30,5 @@ lambda_functions/**/constants.py
 .claude/
 
 .vscode/
+
+.github/
