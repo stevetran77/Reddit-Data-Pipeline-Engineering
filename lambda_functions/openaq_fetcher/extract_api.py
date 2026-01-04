@@ -165,11 +165,18 @@ def filter_active_sensors(locations: list, lookback_days: int = 7,
                 param_name = param.get('name') if isinstance(param, dict) else None
 
                 if param_name:
+                    # Normalize parameter name by removing decimal points for matching
+                    # API returns 'pm25' but required_parameters has 'PM2.5'
+                    param_normalized = param_name.lower().replace('.', '')
+
                     # Check if this parameter matches any required parameter
-                    if any(req.lower() in param_name.lower() for req in required_parameters):
-                        sensor_id = sensor.get('id')
-                        if sensor_id and sensor_id not in active_sensor_ids:
-                            active_sensor_ids.append(sensor_id)
+                    for req in required_parameters:
+                        req_normalized = req.lower().replace('.', '')
+                        if req_normalized == param_normalized or req_normalized in param_normalized:
+                            sensor_id = sensor.get('id')
+                            if sensor_id and sensor_id not in active_sensor_ids:
+                                active_sensor_ids.append(sensor_id)
+                            break
 
         print(f"[SUCCESS] Filtered to {len(active_sensor_ids)} active sensors")
         return active_sensor_ids
@@ -343,6 +350,27 @@ def enrich_measurements_with_metadata(measurements: list, locations: list) -> li
             print("[WARNING] Empty measurements list, cannot enrich")
             return []
 
+        # Location ID -> City name mapping for locations with null locality
+        # Maps location IDs to proper city names when OpenAQ API doesn't provide locality
+        LOCATION_CITY_MAP = {
+            # Hanoi locations (based on coordinates ~21°N)
+            18: "Hanoi",          # SPARTAN - Vietnam Acad. Sci.
+            2539: "Hanoi",        # US Diplomatic Post: Hanoi
+            307169: "Hanoi",      # nồng độ pm
+            6123215: "Hanoi",     # OceanPark
+
+            # Ho Chi Minh City locations (based on coordinates ~10-11°N)
+            2446: "Ho Chi Minh City",      # US Diplomatic Post: Ho Chi Minh City
+            268816: "Ho Chi Minh City",    # outdoor
+            268821: "Ho Chi Minh City",    # outdoor2
+            268929: "Ho Chi Minh City",    # od3
+            268935: "Ho Chi Minh City",    # od5
+            268937: "Ho Chi Minh City",    # od6
+            3276359: "Ho Chi Minh City",   # CMT8
+            4743591: "Ho Chi Minh City",   # Trường ĐH Khoa học Tự nhiên, ĐHQG-HCM
+            6068138: "Ho Chi Minh City",   # Care Centre
+        }
+
         # Build sensor_id -> location metadata mapping
         sensor_to_location = {}
         for loc in locations:
@@ -358,6 +386,9 @@ def enrich_measurements_with_metadata(measurements: list, locations: list) -> li
             latitude = coords.get('latitude') if coords else None
             longitude = coords.get('longitude') if coords else None
 
+            # Determine city name: use locality if available, else use mapped city, else Unknown
+            city_name = locality or LOCATION_CITY_MAP.get(loc_id) or 'Unknown'
+
             sensors = loc.get('sensors', [])
             for sensor in sensors:
                 sensor_id = sensor.get('id')
@@ -365,7 +396,7 @@ def enrich_measurements_with_metadata(measurements: list, locations: list) -> li
                     sensor_to_location[sensor_id] = {
                         'location_id': loc_id,
                         'location_name': loc_name,
-                        'city': locality,
+                        'city': city_name,
                         'timezone': timezone,
                         'country_code': country_code,
                         'latitude': latitude,

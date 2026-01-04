@@ -193,7 +193,10 @@ def trigger_glue_transform_job(job_name: str = None, **context) -> str:
     print(f"  - Records: {record_count}")
     print(f"  - Raw data path: {raw_s3_path}")
 
-    country_folder = OPENAQ_TARGET_COUNTRY.lower()
+    # Map country codes to full names for table naming
+    country_name_map = {"VN": "vietnam", "TH": "thailand"}
+    country_folder = country_name_map.get(OPENAQ_TARGET_COUNTRY, OPENAQ_TARGET_COUNTRY.lower())
+    
     # Prepare Glue job arguments
     input_path = f"s3://{AWS_BUCKET_NAME}/{RAW_FOLDER}/"
     output_path = f"s3://{AWS_BUCKET_NAME}/aq_dev/marts/{country_folder}/"

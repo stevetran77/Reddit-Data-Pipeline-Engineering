@@ -32,3 +32,5 @@ lambda_functions/**/constants.py
 .vscode/
 
 .github/
+
+.pytest_cache/
